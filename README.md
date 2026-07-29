@@ -3,10 +3,11 @@
 A personal stock assistant, an agent that updates the positions and news of your
 holding stocks and provides financial suggestions daily.
 
-This is the base scaffold: a web UI to **add** and **view** stocks, backed by a
-local storage system, with a clean **API layer** in between. The UI and storage
-never talk to each other directly — everything goes through the API — so either
-side can be swapped or extended independently.
+This is the base scaffold: a web UI to **buy**, **sell**, **delete**, and
+**view** stocks — plus a separate **wishlist** of tickers you plan to buy —
+backed by a local storage system, with a clean **API layer** in between. The UI
+and storage never talk to each other directly — everything goes through the API
+— so either side can be swapped or extended independently.
 
 ## Architecture
 
@@ -36,17 +37,40 @@ side can be swapped or extended independently.
 
 ## API
 
-| Method | Path          | Purpose                        | Body                              |
-| ------ | ------------- | ------------------------------ | --------------------------------- |
-| GET    | `/api/stocks` | List all positions (read only) | —                                 |
-| POST   | `/api/stocks` | Add / accumulate (write only)  | `{"ticker","shares","avg_price"}` |
+### Holdings
 
-When a ticker already exists, POST accumulates the shares and recomputes the
-weighted-average price:
+| Method | Path               | Purpose                          | Body                              |
+| ------ | ------------------ | -------------------------------- | --------------------------------- |
+| GET    | `/api/stocks`      | List all positions (read only)   | —                                 |
+| POST   | `/api/stocks`      | Buy / accumulate a position      | `{"ticker","shares","avg_price"}` |
+| POST   | `/api/stocks/sell` | Sell part/all of a position      | `{"ticker","shares","price"}`     |
+| DELETE | `/api/stocks`      | Delete an entire position        | `{"ticker"}`                      |
+
+### Wishlist
+
+| Method | Path            | Purpose                            | Body         |
+| ------ | --------------- | ---------------------------------- | ------------ |
+| GET    | `/api/wishlist` | List wishlist tickers (read only)  | —            |
+| POST   | `/api/wishlist` | Add a ticker to the wishlist       | `{"ticker"}` |
+| DELETE | `/api/wishlist` | Remove a ticker from the wishlist  | `{"ticker"}` |
+
+**Buy** — when a ticker already exists, the shares are accumulated and the
+weighted-average cost basis is recomputed:
 
 ```
 new_avg = (old_shares * old_avg + added_shares * added_price) / (old_shares + added_shares)
 ```
+
+**Sell** — reduces the share count at the given sale price. The per-share cost
+basis is *unchanged* (selling doesn't alter what your remaining shares
+originally cost); selling the full position removes it.
+
+**Delete** — drops an entire holding outright, for fixing a mistyped ticker. It
+records no sale.
+
+**Wishlist** — a separate table of tickers you don't own yet but plan to buy
+(ticker only, no shares or price). Kept apart from holdings so it can later feed
+the AI's buy suggestions.
 
 ## Run it
 
@@ -58,4 +82,5 @@ python3 run.py
 
 Then open http://127.0.0.1:8000 in your browser.
 
-Data is stored locally in `data/portfolio.json`.
+Holdings are stored locally in `data/portfolio.json` and the wishlist in
+`data/wishlist.json` — two separate tables.

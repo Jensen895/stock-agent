@@ -13,25 +13,48 @@
       <p class="subtitle">Track your holdings and cost basis</p>
     </header>
 
-    <!-- ADD STOCK (write only) -->
+    <!-- BUY / ADD STOCK (write) -->
     <section class="card">
-      <h2>Add Stock</h2>
-      <form id="add-form" autocomplete="off">
+      <h2>Buy / Add Stock</h2>
+      <form id="buy-form" autocomplete="off">
         <div class="field">
           <label for="ticker">Ticker</label>
           <input id="ticker" name="ticker" type="text" placeholder="AAPL" required />
         </div>
         <div class="field">
-          <label for="shares">Shares owned</label>
+          <label for="shares">Shares bought</label>
           <input id="shares" name="shares" type="number" step="any" min="0" placeholder="10" required />
         </div>
         <div class="field">
-          <label for="avg_price">Average price</label>
+          <label for="avg_price">Buy price</label>
           <input id="avg_price" name="avg_price" type="number" step="any" min="0" placeholder="150.00" required />
         </div>
-        <button type="submit">Add / Accumulate</button>
+        <button type="submit">Buy / Add</button>
       </form>
-      <p id="message" class="message" role="status"></p>
+      <p id="buy-message" class="message" role="status"></p>
+    </section>
+
+    <!-- SELL STOCK (write) -->
+    <section class="card">
+      <h2>Sell Stock</h2>
+      <p class="hint">Sold some shares? Record the sale here — the rest of your
+        position stays put.</p>
+      <form id="sell-form" autocomplete="off">
+        <div class="field">
+          <label for="sell-ticker">Ticker</label>
+          <input id="sell-ticker" name="ticker" type="text" placeholder="AAPL" required />
+        </div>
+        <div class="field">
+          <label for="sell-shares">Shares sold</label>
+          <input id="sell-shares" name="shares" type="number" step="any" min="0" placeholder="5" required />
+        </div>
+        <div class="field">
+          <label for="sell-price">Sale price</label>
+          <input id="sell-price" name="price" type="number" step="any" min="0" placeholder="175.00" required />
+        </div>
+        <button type="submit">Sell</button>
+      </form>
+      <p id="sell-message" class="message" role="status"></p>
     </section>
 
     <!-- VIEW STOCKS (read only) -->
@@ -47,12 +70,33 @@
             <th class="num">Shares</th>
             <th class="num">Avg Price</th>
             <th class="num">Cost Basis</th>
+            <th class="actions-col"></th>
           </tr>
         </thead>
         <tbody id="stocks-body">
-          <tr><td colspan="4" class="empty">Loading…</td></tr>
+          <tr><td colspan="5" class="empty">Loading…</td></tr>
         </tbody>
       </table>
+    </section>
+
+    <!-- WISHLIST (write + read) -->
+    <section class="card">
+      <div class="section-head">
+        <h2>⭐ Wishlist</h2>
+      </div>
+      <p class="hint">Stocks you don't own yet but plan to buy. Ticker only —
+        no shares or price.</p>
+      <form id="wishlist-form" class="inline-form" autocomplete="off">
+        <div class="field">
+          <label for="wishlist-ticker">Ticker</label>
+          <input id="wishlist-ticker" name="ticker" type="text" placeholder="NVDA" required />
+        </div>
+        <button type="submit">Add to Wishlist</button>
+      </form>
+      <p id="wishlist-message" class="message" role="status"></p>
+      <ul id="wishlist-list" class="taglist">
+        <li class="empty">Loading…</li>
+      </ul>
     </section>
   </main>
 

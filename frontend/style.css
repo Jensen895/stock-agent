@@ -85,9 +85,21 @@ button.secondary {
 }
 button.secondary:hover { background: var(--bg); }
 
+/* Buy = green (like gains), Sell = red (like losses). */
+#buy-form button[type="submit"] { background: var(--ok); color: #052e16; }
+#buy-form button[type="submit"]:hover { background: #22c55e; }
+#sell-form button[type="submit"] { background: var(--err); color: #450a0a; }
+#sell-form button[type="submit"]:hover { background: #ef4444; }
+
 .message { min-height: 1.2rem; margin: 0.9rem 0 0; font-size: 0.9rem; }
 .message.ok { color: var(--ok); }
 .message.err { color: var(--err); }
+
+.hint { color: var(--muted); font-size: 0.85rem; margin: -0.4rem 0 1rem; }
+
+/* Wishlist uses a compact single-field row instead of the 3-col grid. */
+form.inline-form { grid-template-columns: 1fr auto; align-items: end; }
+form.inline-form button { grid-column: auto; }
 
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 0.6rem 0.5rem; border-bottom: 1px solid var(--border); }
@@ -95,6 +107,50 @@ th { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-s
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .empty { text-align: center; color: var(--muted); padding: 1.5rem; }
 
+.actions-col { text-align: right; width: 1%; white-space: nowrap; }
+
+/* Inline text-style action buttons (e.g. Delete in a table row). */
+.link-btn {
+  grid-column: auto;
+  background: transparent;
+  border: none;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--accent);
+}
+.link-btn.danger { color: var(--err); }
+.link-btn:hover { text-decoration: underline; }
+
+/* Wishlist tags */
+.taglist { list-style: none; margin: 1rem 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.taglist .empty { padding: 0.5rem 0; }
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.3rem 0.4rem 0.3rem 0.8rem;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+.tag-remove {
+  grid-column: auto;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+}
+.tag-remove:hover { color: var(--err); background: transparent; }
+
 @media (max-width: 520px) {
   form { grid-template-columns: 1fr; }
+  form.inline-form { grid-template-columns: 1fr; }
 }

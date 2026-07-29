@@ -1,13 +1,22 @@
 """API layer — the ONLY bridge between the UI and the storage system.
 
-Exposes a small REST API over the PortfolioService. Any UI (this web
-frontend, a CLI, a mobile app, ...) talks to these endpoints; it never
-touches the service or storage directly.
+Exposes a small REST API over the PortfolioService and WishlistService. Any UI
+(this web frontend, a CLI, a mobile app, ...) talks to these endpoints; it never
+touches the services or storage directly.
 
 Endpoints:
-  GET  /api/stocks   -> list all positions          (read only)
-  POST /api/stocks   -> add/accumulate a position    (write only)
-                        body: {"ticker","shares","avg_price"}
+  GET    /api/stocks        -> list all positions            (read only)
+  POST   /api/stocks        -> buy / accumulate a position   (write)
+                               body: {"ticker","shares","avg_price"}
+  POST   /api/stocks/sell   -> sell part/all of a position   (write)
+                               body: {"ticker","shares","price"}
+  DELETE /api/stocks        -> delete an entire position      (write)
+                               body: {"ticker"}
+  GET    /api/wishlist      -> list wishlist tickers          (read only)
+  POST   /api/wishlist      -> add a ticker to the wishlist   (write)
+                               body: {"ticker"}
+  DELETE /api/wishlist      -> remove a ticker from wishlist  (write)
+                               body: {"ticker"}
 
 Static files (the web UI) are served from the frontend/ directory.
 Implemented with the Python standard library only — no dependencies.
@@ -17,7 +26,7 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from backend.service import PortfolioService, ValidationError
+from backend.service import PortfolioService, WishlistService, ValidationError
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 
@@ -28,15 +37,17 @@ _CONTENT_TYPES = {
 }
 
 
-def make_handler(service: PortfolioService):
-    """Build a request handler bound to a given service instance."""
+def make_handler(portfolio: PortfolioService, wishlist: WishlistService):
+    """Build a request handler bound to the given service instances."""
 
     class Handler(BaseHTTPRequestHandler):
         # --- routing ----------------------------------------------------
 
         def do_GET(self):
             if self.path == "/api/stocks":
-                self._handle_list()
+                self._send_json(200, {"stocks": portfolio.list_stocks()})
+            elif self.path == "/api/wishlist":
+                self._send_json(200, {"wishlist": wishlist.list_wishlist()})
             elif self.path in ("/", "/index.html"):
                 self._serve_static("index.html")
             elif self.path.lstrip("/") in ("style.css", "app.js"):
@@ -46,29 +57,69 @@ def make_handler(service: PortfolioService):
 
         def do_POST(self):
             if self.path == "/api/stocks":
-                self._handle_add()
+                self._handle_buy()
+            elif self.path == "/api/stocks/sell":
+                self._handle_sell()
+            elif self.path == "/api/wishlist":
+                self._handle_wishlist_add()
+            else:
+                self._send_json(404, {"error": "Not found"})
+
+        def do_DELETE(self):
+            if self.path == "/api/stocks":
+                self._handle_delete()
+            elif self.path == "/api/wishlist":
+                self._handle_wishlist_remove()
             else:
                 self._send_json(404, {"error": "Not found"})
 
         # --- API handlers -----------------------------------------------
 
-        def _handle_list(self):
-            self._send_json(200, {"stocks": service.list_stocks()})
-
-        def _handle_add(self):
-            try:
-                body = self._read_json_body()
-                position = service.add_stock(
+        def _handle_buy(self):
+            def action(body):
+                return {"stock": portfolio.add_stock(
                     ticker=body.get("ticker"),
                     shares=body.get("shares"),
                     price=body.get("avg_price"),
-                )
+                )}
+            self._run(action)
+
+        def _handle_sell(self):
+            def action(body):
+                return {"sale": portfolio.sell_stock(
+                    ticker=body.get("ticker"),
+                    shares=body.get("shares"),
+                    price=body.get("price"),
+                )}
+            self._run(action)
+
+        def _handle_delete(self):
+            def action(body):
+                return {"deleted": portfolio.delete_stock(ticker=body.get("ticker"))}
+            self._run(action)
+
+        def _handle_wishlist_add(self):
+            def action(body):
+                return {"entry": wishlist.add(ticker=body.get("ticker"))}
+            self._run(action)
+
+        def _handle_wishlist_remove(self):
+            def action(body):
+                return {"removed": wishlist.remove(ticker=body.get("ticker"))}
+            self._run(action)
+
+        def _run(self, action):
+            """Read the JSON body, run a write action, and send its result.
+            Centralizes the shared validation/error handling for all writes."""
+            try:
+                body = self._read_json_body()
+                payload = action(body)
             except ValidationError as e:
                 self._send_json(400, {"error": str(e)})
             except (json.JSONDecodeError, TypeError):
                 self._send_json(400, {"error": "Invalid request body."})
             else:
-                self._send_json(200, {"stock": position})
+                self._send_json(200, payload)
 
         # --- helpers ----------------------------------------------------
 
@@ -106,8 +157,13 @@ def make_handler(service: PortfolioService):
     return Handler
 
 
-def run_server(service: PortfolioService, host: str = "127.0.0.1", port: int = 8000):
-    handler = make_handler(service)
+def run_server(
+    portfolio: PortfolioService,
+    wishlist: WishlistService,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+):
+    handler = make_handler(portfolio, wishlist)
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"Stock assistant running at http://{host}:{port}")
     print("Press Ctrl+C to stop.")
