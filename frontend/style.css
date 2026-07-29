@@ -1,0 +1,100 @@
+:root {
+  --bg: #0f172a;
+  --card: #1e293b;
+  --border: #334155;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --accent-hover: #0ea5e9;
+  --ok: #4ade80;
+  --err: #f87171;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.container {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+header { text-align: center; margin-bottom: 2rem; }
+h1 { margin: 0; font-size: 1.75rem; }
+.subtitle { color: var(--muted); margin: 0.25rem 0 0; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.card h2 { margin: 0 0 1rem; font-size: 1.15rem; }
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+.section-head h2 { margin: 0; }
+
+form { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; align-items: end; }
+.field { display: flex; flex-direction: column; gap: 0.35rem; }
+label { font-size: 0.8rem; color: var(--muted); }
+
+input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.7rem;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+input:focus { outline: none; border-color: var(--accent); }
+
+button {
+  grid-column: 1 / -1;
+  background: var(--accent);
+  color: #04222f;
+  border: none;
+  border-radius: 8px;
+  padding: 0.65rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover { background: var(--accent-hover); }
+
+button.secondary {
+  grid-column: auto;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  padding: 0.4rem 0.9rem;
+  font-weight: 500;
+}
+button.secondary:hover { background: var(--bg); }
+
+.message { min-height: 1.2rem; margin: 0.9rem 0 0; font-size: 0.9rem; }
+.message.ok { color: var(--ok); }
+.message.err { color: var(--err); }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.6rem 0.5rem; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.empty { text-align: center; color: var(--muted); padding: 1.5rem; }
+
+@media (max-width: 520px) {
+  form { grid-template-columns: 1fr; }
+}

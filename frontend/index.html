@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Personal Stock Assistant</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>📈 Personal Stock Assistant</h1>
+      <p class="subtitle">Track your holdings and cost basis</p>
+    </header>
+
+    <!-- ADD STOCK (write only) -->
+    <section class="card">
+      <h2>Add Stock</h2>
+      <form id="add-form" autocomplete="off">
+        <div class="field">
+          <label for="ticker">Ticker</label>
+          <input id="ticker" name="ticker" type="text" placeholder="AAPL" required />
+        </div>
+        <div class="field">
+          <label for="shares">Shares owned</label>
+          <input id="shares" name="shares" type="number" step="any" min="0" placeholder="10" required />
+        </div>
+        <div class="field">
+          <label for="avg_price">Average price</label>
+          <input id="avg_price" name="avg_price" type="number" step="any" min="0" placeholder="150.00" required />
+        </div>
+        <button type="submit">Add / Accumulate</button>
+      </form>
+      <p id="message" class="message" role="status"></p>
+    </section>
+
+    <!-- VIEW STOCKS (read only) -->
+    <section class="card">
+      <div class="section-head">
+        <h2>Your Stocks</h2>
+        <button id="refresh" class="secondary" type="button">Refresh</button>
+      </div>
+      <table id="stocks-table">
+        <thead>
+          <tr>
+            <th>Ticker</th>
+            <th class="num">Shares</th>
+            <th class="num">Avg Price</th>
+            <th class="num">Cost Basis</th>
+          </tr>
+        </thead>
+        <tbody id="stocks-body">
+          <tr><td colspan="4" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
