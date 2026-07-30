@@ -14,11 +14,12 @@ Responsibilities:
   - wishlist: track tickers you plan to buy but don't yet own (ticker only)
   - sales log: every sale is recorded so realized gains can be summed over
     time windows (1d / 1w / 1m / ytd / 1y)
-  - summary: total holdings worth + realized gains + (placeholder) unrealized
-    gains, for the dashboard at the top of the UI
+  - market: enrich holdings/wishlist with live prices and earnings dates, and
+    compute real unrealized gains (today + total) for the dashboard
+  - summary: total holdings worth + realized gains + real unrealized gains, for
+    the dashboard at the top of the UI
 """
 
-import random
 from datetime import datetime, timedelta, timezone
 
 from backend.storage import StorageBackend
@@ -306,62 +307,294 @@ class SalesService:
         return {key: round(value, 2) for key, value in totals.items()}
 
 
-# Fixed seeds per interval so the placeholder graph is stable across restarts
-# (rather than jumping to new random numbers on every refresh).
-_DUMMY_SEEDS = {"1d": 11, "1w": 22, "1m": 33, "ytd": 44, "1y": 55}
-# How many points to plot for each interval's line graph.
-_DUMMY_POINTS = {"1d": 24, "1w": 14, "1m": 30, "ytd": 24, "1y": 24}
+# The views the unrealized-gains section toggles between (in display order). The
+# 1D/1W/1M/YTD/1Y windows show the gain accrued over that period (current price
+# vs. the price at the window's start); "total" is measured against average cost.
+# 1D is measured against the previous close (today's move).
+UNREALIZED_VIEWS = INTERVALS + [("total", "Total")]
+
+# The windowed unrealized views that use daily history (everything but 1D, which
+# uses intraday data, and "total", which is measured against cost basis).
+_UNREALIZED_WINDOW_KEYS = ["1w", "1m", "ytd", "1y"]
 
 
-def dummy_unrealized_gains(now: datetime = None) -> dict:
-    """PLACEHOLDER unrealized gains + time series for each interval.
+def _gain(price, base, shares):
+    """A signed dollar change and its percentage: (price - base) * shares, and
+    (price - base) / base. Returns None if either input is missing/zero."""
+    if price is None or not base:
+        return None
+    return {
+        "value": round((price - base) * shares, 2),
+        "pct": round((price - base) / base * 100, 2),
+    }
 
-    The real thing needs a live price feed (current price vs. average cost),
-    which isn't wired up yet. Until then this returns deterministic dummy data
-    so the UI — number + line graph — can be built and reviewed.
 
-    Returns {interval: {"value": float, "series": [{"t": iso, "v": float}, ...]}}.
+def _combine_series(series_by_ticker, shares_by_ticker, baseline_by_ticker):
+    """Sum per-ticker price series into one portfolio gain-over-time series.
+
+    Each ticker contributes shares * (price_at_t - baseline). Tickers are
+    sampled onto the union of all their timestamps, forward-filling each
+    ticker's last known price (its baseline before its first point), so the
+    combined line stays continuous even when tickers report on different grids.
+
+    Returns [(ts_ms, gain), ...] sorted by time.
     """
-    now = now or datetime.now(timezone.utc)
-    cutoffs = _interval_cutoffs(now)
-    out = {}
+    all_ts = sorted({ts for s in series_by_ticker.values() for ts, _ in s})
+    if not all_ts:
+        return []
 
-    for key in INTERVAL_KEYS:
-        rng = random.Random(_DUMMY_SEEDS[key])
-        points = _DUMMY_POINTS[key]
-        start = cutoffs[key]
-        span = (now - start) / (points - 1)
+    idx = {t: 0 for t in series_by_ticker}
+    last = {t: None for t in series_by_ticker}
+    combined = []
+    for ts in all_ts:
+        total = 0.0
+        for t, series in series_by_ticker.items():
+            while idx[t] < len(series) and series[idx[t]][0] <= ts:
+                last[t] = series[idx[t]][1]
+                idx[t] += 1
+            base = baseline_by_ticker.get(t)
+            if base is None:
+                continue
+            price = last[t] if last[t] is not None else base
+            total += shares_by_ticker[t] * (price - base)
+        combined.append((ts, round(total, 2)))
+    return combined
 
-        value = 0.0
-        series = []
-        for i in range(points):
-            # random walk with a slight bias; sign of the final value varies
-            # by seed so some intervals show green and others red.
-            value += rng.uniform(-45, 55)
-            t = start + span * i
-            series.append({"t": t.isoformat(), "v": round(value, 2)})
 
-        out[key] = {"value": series[-1]["v"], "series": series}
+class MarketService:
+    """Live-market layer: enriches holdings and wishlist with real prices and
+    earnings dates, and computes real unrealized gains for the dashboard.
 
-    return out
+    Composes the portfolio (for what's owned and its cost basis) with a market
+    data provider (for live prices, history, and earnings). Everything degrades
+    gracefully: when a quote can't be fetched the enriched fields are None and
+    callers render "—".
+    """
+
+    def __init__(self, provider, portfolio: PortfolioService):
+        self.provider = provider
+        self.portfolio = portfolio
+
+    def holdings_view(self) -> list:
+        """Holdings enriched with live price, today's and total unrealized gain
+        (value + %), market value, and the next earnings date."""
+        positions = self.portfolio.list_stocks()
+        tickers = [p["ticker"] for p in positions]
+        quotes = self.provider.get_quotes(tickers)
+        earnings = self.provider.get_earnings_dates(tickers)
+
+        rows = []
+        for p in positions:
+            ticker, shares, avg = p["ticker"], p["shares"], p["avg_price"]
+            quote = quotes.get(ticker)
+            row = {
+                "ticker": ticker,
+                "shares": shares,
+                "avg_price": avg,
+                "cost_basis": round(shares * avg, 2),
+                "earnings_date": earnings.get(ticker),
+                "price": None,
+                "previous_close": None,
+                "market_value": None,
+                "today": None,
+                "total": None,
+                "quote_ok": False,
+            }
+            if quote and quote.get("price") is not None:
+                price = quote["price"]
+                prev = quote.get("previous_close")
+                row.update(
+                    price=round(price, 4),
+                    previous_close=round(prev, 4) if prev else None,
+                    market_value=round(price * shares, 2),
+                    today=_gain(price, prev, shares),
+                    total=_gain(price, avg, shares),
+                    quote_ok=True,
+                )
+            rows.append(row)
+        return rows
+
+    def wishlist_view(self, tickers) -> list:
+        """Wishlist tickers enriched with today's open, the live price, the
+        change vs. the open (value + %), and the next earnings date."""
+        tickers = list(tickers)
+        quotes = self.provider.get_quotes(tickers)
+        earnings = self.provider.get_earnings_dates(tickers)
+
+        rows = []
+        for ticker in tickers:
+            quote = quotes.get(ticker)
+            row = {
+                "ticker": ticker,
+                "open": None,
+                "price": None,
+                "change": None,
+                "change_pct": None,
+                "earnings_date": earnings.get(ticker),
+                "quote_ok": False,
+            }
+            if quote and quote.get("price") is not None:
+                price = quote["price"]
+                day_open = quote.get("open")
+                row.update(price=round(price, 4), quote_ok=True)
+                if day_open:
+                    row.update(
+                        open=round(day_open, 4),
+                        change=round(price - day_open, 2),
+                        change_pct=round((price - day_open) / day_open * 100, 2),
+                    )
+            rows.append(row)
+        return rows
+
+    def unrealized_summary(self) -> dict:
+        """Real unrealized gains for the dashboard, one entry per view:
+
+          1D            : gain vs. each holding's previous close (today's move),
+                          with an intraday graph over today's session.
+          1W/1M/YTD/1Y  : gain accrued over the window — current price vs. the
+                          price at the window's start — with a graph over it.
+          total         : gain vs. average cost, graphed over the past year.
+
+        Each view is {"value", "pct", "series": [{"t": iso, "v": float}, ...]}.
+        Values come straight from live quotes so they match the per-holding rows;
+        the series provide the graph shape. Missing data -> value None.
+        """
+        positions = self.portfolio.list_stocks()
+        tickers = [p["ticker"] for p in positions]
+        shares = {p["ticker"]: p["shares"] for p in positions}
+        avg = {p["ticker"]: p["avg_price"] for p in positions}
+        quotes = self.provider.get_quotes(tickers)
+        now = datetime.now(timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+
+        prev_close = {}
+        price = {}
+        for t in tickers:
+            q = quotes.get(t)
+            if q and q.get("price") is not None:
+                price[t] = q["price"]
+                prev_close[t] = q.get("previous_close")
+
+        # Fetch history once, concurrently, and reuse it across every window.
+        intraday = self.provider.get_intraday_many(tickers)
+        daily = self.provider.get_daily_many(tickers)
+        cutoffs = _interval_cutoffs(now)
+
+        out = {
+            "1d": self._today_view(tickers, shares, prev_close, price, intraday, now_ms),
+            "total": self._total_view(tickers, shares, avg, price, daily, now_ms),
+        }
+        for key in _UNREALIZED_WINDOW_KEYS:
+            cutoff_ms = int(cutoffs[key].timestamp() * 1000)
+            out[key] = self._window_view(tickers, shares, price, daily, cutoff_ms, now_ms)
+        return out
+
+    # --- unrealized helpers ---------------------------------------------
+
+    def _today_view(self, tickers, shares, prev_close, price, intraday, now_ms):
+        # Headline figures come from live quotes so they match the holdings rows.
+        base = sum(
+            shares[t] * prev_close[t] for t in tickers if prev_close.get(t)
+        )
+        value = sum(
+            shares[t] * (price[t] - prev_close[t])
+            for t in tickers
+            if prev_close.get(t) and t in price
+        )
+        series_by_ticker = {}
+        baseline = {}
+        for t in tickers:
+            prev, series = intraday.get(t, (None, []))
+            if prev and series:
+                series_by_ticker[t] = series
+                baseline[t] = prev
+        combined = _combine_series(series_by_ticker, shares, baseline)
+        combined = self._append_now(combined, value, now_ms)
+        return self._view(value if base else None, value, base, combined)
+
+    def _window_view(self, tickers, shares, price, daily, cutoff_ms, now_ms):
+        # Baseline per holding is the first close on/after the window's start;
+        # the gain is the current price measured against that.
+        series_by_ticker = {}
+        baseline = {}
+        for t in tickers:
+            points = [(ts, c) for ts, c in daily.get(t, []) if ts >= cutoff_ms]
+            if points:
+                series_by_ticker[t] = points
+                baseline[t] = points[0][1]
+        base = sum(shares[t] * baseline[t] for t in baseline)
+        value = sum(
+            shares[t] * (price[t] - baseline[t])
+            for t in baseline
+            if t in price
+        )
+        combined = _combine_series(series_by_ticker, shares, baseline)
+        combined = self._append_now(combined, value, now_ms)
+        return self._view(value if baseline else None, value, base, combined)
+
+    def _total_view(self, tickers, shares, avg, price, daily, now_ms):
+        base = sum(shares[t] * avg[t] for t in tickers)  # cost basis
+        value = sum(
+            shares[t] * (price[t] - avg[t]) for t in tickers if t in price
+        )
+        series_by_ticker = {t: daily[t] for t in tickers if daily.get(t)}
+        combined = _combine_series(series_by_ticker, shares, avg)
+        combined = self._append_now(combined, value, now_ms)
+        return self._view(value if series_by_ticker or price else None,
+                          value, base, combined)
+
+    @staticmethod
+    def _append_now(combined, value, now_ms):
+        """End the graph at the live headline value so the line agrees with the
+        number shown above it."""
+        if not combined:
+            return combined
+        if combined[-1][0] < now_ms:
+            combined = combined + [(now_ms, round(value, 2))]
+        else:
+            combined = combined[:-1] + [(combined[-1][0], round(value, 2))]
+        return combined
+
+    @staticmethod
+    def _view(headline, value, base, combined):
+        series = [
+            {"t": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
+             "v": v}
+            for ts, v in combined
+        ]
+        if headline is None:
+            return {"value": None, "pct": None, "series": series}
+        pct = round(value / base * 100, 2) if base else None
+        return {"value": round(value, 2), "pct": pct, "series": series}
 
 
 class SummaryService:
     """Composes the dashboard summary from the other services.
 
     Pulls total holdings worth (from the portfolio), realized gains by interval
-    (from the sales log), and placeholder unrealized gains + graph series.
+    (from the sales log), and real unrealized gains + graph series (today/total)
+    from the market service.
     """
 
-    def __init__(self, portfolio: PortfolioService, sales: SalesService):
+    def __init__(
+        self,
+        portfolio: PortfolioService,
+        sales: SalesService,
+        market: "MarketService" = None,
+    ):
         self.portfolio = portfolio
         self.sales = sales
+        self.market = market
 
     def summary(self) -> dict:
+        unrealized = self.market.unrealized_summary() if self.market else {}
         return {
             "total_worth": self.portfolio.total_cost_basis(),
             "realized": self.sales.realized_gains_by_interval(),
             "sales": self.sales.list_sales(),  # sell history, newest first
-            "unrealized": dummy_unrealized_gains(),
+            "unrealized": unrealized,
             "intervals": [{"key": k, "label": lbl} for k, lbl in INTERVALS],
+            "unrealized_views": [
+                {"key": k, "label": lbl} for k, lbl in UNREALIZED_VIEWS
+            ],
         }

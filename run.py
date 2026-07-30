@@ -11,8 +11,10 @@ StorageBackend implementation. Nothing else changes.
 
 import os
 
+from backend.market_data import MarketDataProvider
 from backend.server import run_server
 from backend.service import (
+    MarketService,
     PortfolioService,
     SalesService,
     SummaryService,
@@ -35,9 +37,12 @@ def main():
     portfolio = PortfolioService(portfolio_storage, sales=sales)
     # wishlist also reads holdings so it can reject stocks you already own.
     wishlist = WishlistService(JSONStorage(WISHLIST_FILE), holdings=portfolio_storage)
-    # dashboard summary: total worth + realized + (placeholder) unrealized gains.
-    summary = SummaryService(portfolio, sales)
-    run_server(portfolio, wishlist, summary, host="127.0.0.1", port=8000)
+    # live market data (Yahoo Finance) — powers real prices, unrealized gains,
+    # and earnings dates. Swap this provider to change data sources.
+    market = MarketService(MarketDataProvider(), portfolio)
+    # dashboard summary: total worth + realized + real unrealized gains.
+    summary = SummaryService(portfolio, sales, market)
+    run_server(portfolio, wishlist, summary, market, host="127.0.0.1", port=8000)
 
 
 if __name__ == "__main__":

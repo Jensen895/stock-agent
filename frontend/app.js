@@ -10,7 +10,7 @@ const totalWorthEl = document.getElementById("total-worth");
 const realizedValueEl = document.getElementById("realized-value");
 const realizedIntervalsEl = document.getElementById("realized-intervals");
 const unrealizedValueEl = document.getElementById("unrealized-value");
-const unrealizedIntervalsEl = document.getElementById("unrealized-intervals");
+const unrealizedViewsEl = document.getElementById("unrealized-views");
 const unrealizedChartEl = document.getElementById("unrealized-chart");
 const chartWrapEl = document.getElementById("chart-wrap");
 const chartGuideEl = document.getElementById("chart-guide");
@@ -24,8 +24,9 @@ let currentChart = null;
 
 // Selected intervals are remembered so the app reopens on the last choice.
 const REALIZED_KEY = "stockagent.realizedInterval";
-const UNREALIZED_KEY = "stockagent.unrealizedInterval";
+const UNREALIZED_KEY = "stockagent.unrealizedView";
 const DEFAULT_INTERVAL = "1m";
+const DEFAULT_UNREALIZED_VIEW = "1m";
 
 let summaryData = null;
 let togglesBuilt = false;
@@ -51,12 +52,12 @@ function renderSummary() {
 // Build the interval toggle buttons once, from the intervals the API reports.
 function buildIntervalToggles() {
   if (togglesBuilt || !summaryData) return;
-  const intervals = summaryData.intervals || [];
-  buildToggle(realizedIntervalsEl, intervals, (key) => {
+  // Realized: 1D/1W/1M/YTD/1Y windows. Unrealized: Today / Total views.
+  buildToggle(realizedIntervalsEl, summaryData.intervals || [], (key) => {
     setStoredInterval(REALIZED_KEY, key);
     renderRealized();
   });
-  buildToggle(unrealizedIntervalsEl, intervals, (key) => {
+  buildToggle(unrealizedViewsEl, summaryData.unrealized_views || [], (key) => {
     setStoredInterval(UNREALIZED_KEY, key);
     renderUnrealized();
   });
@@ -111,11 +112,21 @@ function renderSellHistory() {
 
 function renderUnrealized() {
   if (!summaryData) return;
-  const key = getStoredInterval(UNREALIZED_KEY);
-  setActiveInterval(unrealizedIntervalsEl, key);
-  const entry = (summaryData.unrealized || {})[key] || { value: 0, series: [] };
-  applyGainValue(unrealizedValueEl, entry.value);
-  drawChart(unrealizedChartEl, entry.series, entry.value, key);
+  // Views are 1D/1W/1M/YTD/1Y/Total. Fall back to the default if the saved
+  // choice isn't offered (e.g. an older stored value).
+  const validKeys = (summaryData.unrealized_views || []).map((v) => v.key);
+  let key = getStoredInterval(UNREALIZED_KEY, DEFAULT_UNREALIZED_VIEW);
+  if (!validKeys.includes(key)) {
+    key = validKeys.includes(DEFAULT_UNREALIZED_VIEW)
+      ? DEFAULT_UNREALIZED_VIEW
+      : validKeys[0];
+  }
+  setActiveInterval(unrealizedViewsEl, key);
+  const entry =
+    (summaryData.unrealized || {})[key] || { value: null, pct: null, series: [] };
+  applyGain(unrealizedValueEl, entry.value, entry.pct);
+  // The 1D line is intraday (minute readout); the rest are daily (date readout).
+  drawChart(unrealizedChartEl, entry.series, entry.value, key === "total" ? "1y" : key);
 }
 
 // Show a signed dollar amount, green when positive, red when negative.
@@ -126,17 +137,32 @@ function applyGainValue(el, value) {
   el.classList.toggle("neg", value < 0);
 }
 
+// Signed dollar amount + percentage — "+$123.45 (+2.34%)" — colored by sign.
+// A null value (no live price) renders as an em dash.
+function applyGain(el, value, pct) {
+  if (value == null) {
+    el.textContent = "—";
+    el.classList.remove("pos", "neg");
+    return;
+  }
+  const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+  const pctText = pct == null ? "" : ` (${sign}${fmt(Math.abs(pct))}%)`;
+  el.textContent = `${sign}$${fmt(Math.abs(value))}${pctText}`;
+  el.classList.toggle("pos", value > 0);
+  el.classList.toggle("neg", value < 0);
+}
+
 function setActiveInterval(container, key) {
   container.querySelectorAll("[data-key]").forEach((b) => {
     b.classList.toggle("active", b.getAttribute("data-key") === key);
   });
 }
 
-function getStoredInterval(storageKey) {
+function getStoredInterval(storageKey, fallback = DEFAULT_INTERVAL) {
   try {
-    return localStorage.getItem(storageKey) || DEFAULT_INTERVAL;
+    return localStorage.getItem(storageKey) || fallback;
   } catch {
-    return DEFAULT_INTERVAL;
+    return fallback;
   }
 }
 
@@ -265,24 +291,27 @@ async function loadStocks() {
     const data = await res.json();
     renderStocks(data.stocks || []);
   } catch {
-    tbody.innerHTML = `<tr><td colspan="5" class="empty">Could not reach the API.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="empty">Could not reach the API.</td></tr>`;
   }
 }
 
 function renderStocks(stocks) {
   if (!stocks.length) {
-    tbody.innerHTML = `<tr><td colspan="5" class="empty">No stocks yet. Buy one above.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="empty">No stocks yet. Buy one above.</td></tr>`;
     return;
   }
   tbody.innerHTML = stocks
     .map((s) => {
-      const costBasis = s.shares * s.avg_price;
       const ticker = escapeHtml(s.ticker);
+      const price = s.price == null ? "—" : `$${fmt(s.price)}`;
       return `<tr>
         <td>${ticker}</td>
         <td class="num">${fmt(s.shares)}</td>
         <td class="num">$${fmt(s.avg_price)}</td>
-        <td class="num">$${fmt(costBasis)}</td>
+        <td class="num">${price}</td>
+        ${gainCell(s.today)}
+        ${gainCell(s.total)}
+        <td class="num earnings">${fmtEarnings(s.earnings_date)}</td>
         <td class="actions-col">
           <button class="link-btn" data-sell="${ticker}">Sell</button>
           <button class="link-btn danger" data-delete="${ticker}">Delete</button>
@@ -290,6 +319,17 @@ function renderStocks(stocks) {
       </tr>`;
     })
     .join("");
+}
+
+// A right-aligned table cell for a {value, pct} gain: "+$12.34 (+1.2%)",
+// green when positive, red when negative, an em dash when there's no data.
+function gainCell(g) {
+  if (!g || g.value == null) return `<td class="num">—</td>`;
+  const v = g.value;
+  const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+  const cls = v > 0 ? "pos" : v < 0 ? "neg" : "";
+  const pct = g.pct == null ? "" : ` (${sign}${fmt(Math.abs(g.pct))}%)`;
+  return `<td class="num ${cls}">${sign}$${fmt(Math.abs(v))}${pct}</td>`;
 }
 
 // Row actions — event-delegated so they work on re-rendered rows.
@@ -422,7 +462,7 @@ sellForm.addEventListener("submit", async (e) => {
 
 const wishlistForm = document.getElementById("wishlist-form");
 const wishlistMsg = document.getElementById("wishlist-message");
-const wishlistList = document.getElementById("wishlist-list");
+const wishlistBody = document.getElementById("wishlist-body");
 
 async function loadWishlist() {
   try {
@@ -430,22 +470,35 @@ async function loadWishlist() {
     const data = await res.json();
     renderWishlist(data.wishlist || []);
   } catch {
-    wishlistList.innerHTML = `<li class="empty">Could not reach the API.</li>`;
+    wishlistBody.innerHTML = `<tr><td colspan="6" class="empty">Could not reach the API.</td></tr>`;
   }
 }
 
 function renderWishlist(items) {
   if (!items.length) {
-    wishlistList.innerHTML = `<li class="empty">Nothing on your wishlist yet.</li>`;
+    wishlistBody.innerHTML = `<tr><td colspan="6" class="empty">Nothing on your wishlist yet.</td></tr>`;
     return;
   }
-  wishlistList.innerHTML = items
+  wishlistBody.innerHTML = items
     .map((w) => {
       const ticker = escapeHtml(w.ticker);
-      return `<li class="tag">
-        <span>${ticker}</span>
-        <button class="tag-remove" data-remove="${ticker}" title="Remove">&times;</button>
-      </li>`;
+      const open = w.open == null ? "—" : `$${fmt(w.open)}`;
+      const price = w.price == null ? "—" : `$${fmt(w.price)}`;
+      // Change vs. the open price: green above the open, red below.
+      const change = gainCell(
+        w.change == null ? null : { value: w.change, pct: w.change_pct }
+      );
+      return `<tr>
+        <td>${ticker}</td>
+        <td class="num">${open}</td>
+        <td class="num">${price}</td>
+        ${change}
+        <td class="num earnings">${fmtEarnings(w.earnings_date)}</td>
+        <td class="actions-col">
+          <button class="link-btn" data-buy="${ticker}">Buy</button>
+          <button class="link-btn danger" data-remove="${ticker}" title="Remove">Remove</button>
+        </td>
+      </tr>`;
     })
     .join("");
 }
@@ -475,7 +528,18 @@ wishlistForm.addEventListener("submit", async (e) => {
   }
 });
 
-wishlistList.addEventListener("click", async (e) => {
+wishlistBody.addEventListener("click", async (e) => {
+  // Buy: prefill the Buy / Add Stock form with this ticker and jump to it.
+  const buyBtn = e.target.closest("[data-buy]");
+  if (buyBtn) {
+    document.getElementById("ticker").value = buyBtn.getAttribute("data-buy");
+    setMessage(buyMsg, "", "");
+    buyForm.scrollIntoView({ behavior: "smooth", block: "center" });
+    document.getElementById("shares").focus();
+    return;
+  }
+
+  // Remove: drop the ticker from the wishlist.
   const btn = e.target.closest("[data-remove]");
   if (!btn) return;
   const ticker = btn.getAttribute("data-remove");
@@ -560,14 +624,28 @@ function fmtTime(iso, intervalKey) {
   });
 }
 
+// Format an earnings date ("YYYY-MM-DD") as "Aug 15, 2026". Em dash if unknown.
+function fmtEarnings(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso + "T00:00:00");
+  if (isNaN(d)) return escapeHtml(iso);
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
 
-// Refresh button also refreshes the dashboard totals.
+// Refresh button also refreshes the dashboard totals and the wishlist (both
+// now carry live prices).
 refreshBtn.addEventListener("click", loadSummary);
+refreshBtn.addEventListener("click", loadWishlist);
 
 // initial load
 loadSummary();

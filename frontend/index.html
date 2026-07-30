@@ -49,12 +49,13 @@
           </div>
         </div>
 
-        <!-- Unrealized gains: placeholder until a live price feed exists. -->
+        <!-- Unrealized gains: live prices vs. cost basis. Today = vs. previous
+             close; Total = vs. average cost. -->
         <div class="gains-panel">
           <div class="gains-head">
-            <span class="label">Unrealized gains <span class="badge">placeholder</span></span>
-            <div id="unrealized-intervals" class="interval-toggle" role="group"
-              aria-label="Unrealized gains interval"></div>
+            <span class="label">Unrealized gains</span>
+            <div id="unrealized-views" class="interval-toggle" role="group"
+              aria-label="Unrealized gains view"></div>
           </div>
           <span id="unrealized-value" class="gains-value">—</span>
           <div id="chart-wrap" class="chart-wrap">
@@ -126,12 +127,15 @@
             <th>Ticker</th>
             <th class="num">Shares</th>
             <th class="num">Avg Price</th>
-            <th class="num">Cost Basis</th>
+            <th class="num">Price</th>
+            <th class="num">Today</th>
+            <th class="num">Total</th>
+            <th class="num">Earnings</th>
             <th class="actions-col"></th>
           </tr>
         </thead>
         <tbody id="stocks-body">
-          <tr><td colspan="5" class="empty">Loading…</td></tr>
+          <tr><td colspan="8" class="empty">Loading…</td></tr>
         </tbody>
       </table>
     </section>
@@ -141,8 +145,8 @@
       <div class="section-head">
         <h2>⭐ Wishlist</h2>
       </div>
-      <p class="hint">Stocks you don't own yet but plan to buy. Ticker only —
-        no shares or price.</p>
+      <p class="hint">Stocks you don't own yet but plan to buy. Shows today's
+        open and the live price — green when above the open, red when below.</p>
       <form id="wishlist-form" class="inline-form" autocomplete="off">
         <div class="field">
           <label for="wishlist-ticker">Ticker</label>
@@ -151,9 +155,21 @@
         <button type="submit">Add to Wishlist</button>
       </form>
       <p id="wishlist-message" class="message" role="status"></p>
-      <ul id="wishlist-list" class="taglist">
-        <li class="empty">Loading…</li>
-      </ul>
+      <table id="wishlist-table">
+        <thead>
+          <tr>
+            <th>Ticker</th>
+            <th class="num">Open</th>
+            <th class="num">Price</th>
+            <th class="num">Change</th>
+            <th class="num">Earnings</th>
+            <th class="actions-col"></th>
+          </tr>
+        </thead>
+        <tbody id="wishlist-body">
+          <tr><td colspan="6" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
     </section>
   </main>
 

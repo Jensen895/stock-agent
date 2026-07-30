@@ -5,7 +5,8 @@ Exposes a small REST API over the PortfolioService and WishlistService. Any UI
 touches the services or storage directly.
 
 Endpoints:
-  GET    /api/stocks        -> list all positions            (read only)
+  GET    /api/stocks        -> list all positions, enriched with live prices,
+                               today/total unrealized gains, and earnings dates
   POST   /api/stocks        -> buy / accumulate a position   (write)
                                body: {"ticker","shares","avg_price"}
   POST   /api/stocks/sell   -> sell part/all of a position   (write)
@@ -29,6 +30,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from backend.service import (
+    MarketService,
     PortfolioService,
     SummaryService,
     WishlistService,
@@ -48,19 +50,25 @@ def make_handler(
     portfolio: PortfolioService,
     wishlist: WishlistService,
     summary: SummaryService,
+    market: MarketService,
 ):
     """Build a request handler bound to the given service instances."""
+
+    def wishlist_tickers():
+        return [entry["ticker"] for entry in wishlist.list_wishlist()]
 
     class Handler(BaseHTTPRequestHandler):
         # --- routing ----------------------------------------------------
 
         def do_GET(self):
             if self.path == "/api/stocks":
-                self._send_json(200, {"stocks": portfolio.list_stocks()})
+                # Enriched with live prices, unrealized gains, and earnings dates.
+                self._send_json(200, {"stocks": market.holdings_view()})
             elif self.path == "/api/summary":
                 self._send_json(200, summary.summary())
             elif self.path == "/api/wishlist":
-                self._send_json(200, {"wishlist": wishlist.list_wishlist()})
+                # Enriched with live open/price + change and earnings dates.
+                self._send_json(200, {"wishlist": market.wishlist_view(wishlist_tickers())})
             elif self.path in ("/", "/index.html"):
                 self._serve_static("index.html")
             elif self.path.lstrip("/") in ("style.css", "app.js"):
@@ -174,10 +182,11 @@ def run_server(
     portfolio: PortfolioService,
     wishlist: WishlistService,
     summary: SummaryService,
+    market: MarketService,
     host: str = "127.0.0.1",
     port: int = 8000,
 ):
-    handler = make_handler(portfolio, wishlist, summary)
+    handler = make_handler(portfolio, wishlist, summary, market)
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"Stock assistant running at http://{host}:{port}")
     print("Press Ctrl+C to stop.")
