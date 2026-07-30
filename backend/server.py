@@ -17,6 +17,8 @@ Endpoints:
                                body: {"ticker"}
   DELETE /api/wishlist      -> remove a ticker from wishlist  (write)
                                body: {"ticker"}
+  GET    /api/summary       -> dashboard totals               (read only)
+                               total worth + realized + unrealized gains
 
 Static files (the web UI) are served from the frontend/ directory.
 Implemented with the Python standard library only — no dependencies.
@@ -26,7 +28,12 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from backend.service import PortfolioService, WishlistService, ValidationError
+from backend.service import (
+    PortfolioService,
+    SummaryService,
+    WishlistService,
+    ValidationError,
+)
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 
@@ -37,7 +44,11 @@ _CONTENT_TYPES = {
 }
 
 
-def make_handler(portfolio: PortfolioService, wishlist: WishlistService):
+def make_handler(
+    portfolio: PortfolioService,
+    wishlist: WishlistService,
+    summary: SummaryService,
+):
     """Build a request handler bound to the given service instances."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -46,6 +57,8 @@ def make_handler(portfolio: PortfolioService, wishlist: WishlistService):
         def do_GET(self):
             if self.path == "/api/stocks":
                 self._send_json(200, {"stocks": portfolio.list_stocks()})
+            elif self.path == "/api/summary":
+                self._send_json(200, summary.summary())
             elif self.path == "/api/wishlist":
                 self._send_json(200, {"wishlist": wishlist.list_wishlist()})
             elif self.path in ("/", "/index.html"):
@@ -160,10 +173,11 @@ def make_handler(portfolio: PortfolioService, wishlist: WishlistService):
 def run_server(
     portfolio: PortfolioService,
     wishlist: WishlistService,
+    summary: SummaryService,
     host: str = "127.0.0.1",
     port: int = 8000,
 ):
-    handler = make_handler(portfolio, wishlist)
+    handler = make_handler(portfolio, wishlist, summary)
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"Stock assistant running at http://{host}:{port}")
     print("Press Ctrl+C to stop.")

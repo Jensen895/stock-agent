@@ -46,6 +46,36 @@ and storage never talk to each other directly — everything goes through the AP
 | POST   | `/api/stocks/sell` | Sell part/all of a position      | `{"ticker","shares","price"}`     |
 | DELETE | `/api/stocks`      | Delete an entire position        | `{"ticker"}`                      |
 
+### Dashboard
+
+| Method | Path           | Purpose                                  | Body |
+| ------ | -------------- | ---------------------------------------- | ---- |
+| GET    | `/api/summary` | Total worth + realized/unrealized gains  | —    |
+
+`/api/summary` returns:
+
+```jsonc
+{
+  "total_worth": 897.0,               // sum of shares * avg_price across holdings
+  "realized":   { "1d": 0, "1w": 0, "1m": 0, "ytd": 0, "1y": 0 },
+  "unrealized": {                     // PLACEHOLDER data (no live prices yet)
+    "1d": { "value": 82.67, "series": [ { "t": "…", "v": 12.3 }, … ] },
+    …
+  },
+  "intervals":  [ { "key": "1d", "label": "1D" }, … ]
+}
+```
+
+- **Total stock worth** — the sum of every holding's cost basis
+  (`shares * avg_price`). Shown as the largest text in the UI, in green.
+- **Realized gains** — summed from the sales log. Each sell records
+  `(sale_price - avg_price) * shares` with a UTC timestamp; the summary buckets
+  those into rolling windows (1D / 1W / 1M / YTD / 1Y). Green when positive, red
+  when negative. The UI remembers the selected window across restarts.
+- **Unrealized gains** — **placeholder** for now: the live-price logic isn't
+  implemented, so the value and its line graph (time × USD, per window) are
+  deterministic dummy data. Same green/red coloring and remembered window.
+
 ### Wishlist
 
 | Method | Path            | Purpose                            | Body         |
@@ -63,7 +93,10 @@ new_avg = (old_shares * old_avg + added_shares * added_price) / (old_shares + ad
 
 **Sell** — reduces the share count at the given sale price. The per-share cost
 basis is *unchanged* (selling doesn't alter what your remaining shares
-originally cost); selling the full position removes it.
+originally cost); selling the full position removes it. Each sale is appended to
+a **sales log** (`data/sales.json`) with its realized gain/loss
+(`(sale_price - avg_price) * shares`) and a timestamp, so realized gains can be
+summed over time by `/api/summary`.
 
 **Delete** — drops an entire holding outright, for fixing a mistyped ticker. It
 records no sale.
@@ -82,5 +115,5 @@ python3 run.py
 
 Then open http://127.0.0.1:8000 in your browser.
 
-Holdings are stored locally in `data/portfolio.json` and the wishlist in
-`data/wishlist.json` — two separate tables.
+Holdings are stored locally in `data/portfolio.json`, the wishlist in
+`data/wishlist.json`, and the sales log in `data/sales.json` — separate tables.

@@ -13,6 +13,63 @@
       <p class="subtitle">Track your holdings and cost basis</p>
     </header>
 
+    <!-- DASHBOARD (read only) -->
+    <section class="card dashboard">
+      <!-- Total worth: sum of every holding's cost basis. Biggest text, green. -->
+      <div class="total-worth">
+        <span class="label">Total stock worth</span>
+        <span id="total-worth" class="worth-value">—</span>
+      </div>
+
+      <div class="gains-grid">
+        <!-- Realized gains: locked in from recorded sells. -->
+        <div class="gains-panel">
+          <div class="gains-head">
+            <span class="label">Realized gains</span>
+            <div id="realized-intervals" class="interval-toggle" role="group"
+              aria-label="Realized gains interval"></div>
+          </div>
+          <span id="realized-value" class="gains-value">—</span>
+
+          <!-- Sell history: ticker, shares, and realized gain per sale. -->
+          <div class="sell-history">
+            <span class="history-title">Sell history</span>
+            <table class="history-table">
+              <thead>
+                <tr>
+                  <th>Stock</th>
+                  <th class="num">Shares</th>
+                  <th class="num">Gains</th>
+                </tr>
+              </thead>
+              <tbody id="sell-history-body">
+                <tr><td colspan="3" class="empty">No sells yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Unrealized gains: placeholder until a live price feed exists. -->
+        <div class="gains-panel">
+          <div class="gains-head">
+            <span class="label">Unrealized gains <span class="badge">placeholder</span></span>
+            <div id="unrealized-intervals" class="interval-toggle" role="group"
+              aria-label="Unrealized gains interval"></div>
+          </div>
+          <span id="unrealized-value" class="gains-value">—</span>
+          <div id="chart-wrap" class="chart-wrap">
+            <svg id="unrealized-chart" class="chart" viewBox="0 0 480 140"
+              preserveAspectRatio="none" role="img"
+              aria-label="Unrealized gains over time"></svg>
+            <!-- Hover overlay: vertical guide + dot at the nearest point. -->
+            <div id="chart-guide" class="chart-guide" hidden></div>
+            <div id="chart-dot" class="chart-dot" hidden></div>
+          </div>
+          <p id="chart-readout" class="chart-readout">Hover the line to see value &amp; time.</p>
+        </div>
+      </div>
+    </section>
+
     <!-- BUY / ADD STOCK (write) -->
     <section class="card">
       <h2>Buy / Add Stock</h2>

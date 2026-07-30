@@ -1,0 +1,36 @@
+{
+  "sales": [
+    {
+      "cost_basis": 120.0,
+      "realized_gain": 120.0,
+      "sale_price": 180.0,
+      "shares": 2,
+      "ticker": "NVDA",
+      "timestamp": "2026-07-29T19:31:11.361834+00:00"
+    },
+    {
+      "cost_basis": 240.0,
+      "realized_gain": -120.0,
+      "sale_price": 200.0,
+      "shares": 3,
+      "ticker": "TSLA",
+      "timestamp": "2026-07-26T00:31:11.361834+00:00"
+    },
+    {
+      "cost_basis": 150.0,
+      "realized_gain": 50.0,
+      "sale_price": 160.0,
+      "shares": 5,
+      "ticker": "AMD",
+      "timestamp": "2026-05-01T00:31:11.361834+00:00"
+    },
+    {
+      "cost_basis": 269.0909,
+      "realized_gain": 92.73,
+      "sale_price": 300.0,
+      "shares": 3.0,
+      "ticker": "AAPL",
+      "timestamp": "2026-07-30T00:34:37.317577+00:00"
+    }
+  ]
+}
