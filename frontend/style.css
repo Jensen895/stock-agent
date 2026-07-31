@@ -21,10 +21,21 @@ body {
 }
 
 .container {
-  max-width: 880px;
+  max-width: 1290px;
   margin: 0 auto;
   padding: 2rem 1.25rem 4rem;
 }
+
+/* Two columns: existing content on the left, AI advisor on the right. The left
+   column keeps its original ~880px width; the AI column sits to its right. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 880px) 370px;
+  gap: 1.5rem;
+  justify-content: center;
+  align-items: start;
+}
+.main-col { min-width: 0; }
 
 header { text-align: center; margin-bottom: 2rem; }
 h1 { margin: 0; font-size: 1.75rem; }
@@ -303,9 +314,190 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 .link-btn.danger { color: var(--err); }
 .link-btn:hover { text-decoration: underline; }
 
+/* Below the two-column width, stack the AI advisor under the main content. */
+@media (max-width: 1180px) {
+  .layout { grid-template-columns: minmax(0, 880px); }
+  .ai-card { position: static; }
+}
+
 @media (max-width: 520px) {
   form { grid-template-columns: 1fr; }
   form.inline-form { grid-template-columns: 1fr; }
   .gains-grid { grid-template-columns: 1fr; }
   .worth-value { font-size: 2.25rem; }
+}
+
+/* --- AI Advisor ------------------------------------------------------- */
+
+/* Sticky so the advisor stays visible while scrolling the long left column. */
+.ai-card {
+  position: sticky;
+  top: 1rem;
+}
+
+.ai-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.ai-head h2 { margin: 0; }
+
+.ai-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.25rem 0 0.75rem;
+}
+
+/* Risk toggle — reuses the segmented look of the dashboard interval toggle. */
+.risk-toggle {
+  display: inline-flex;
+  gap: 0.15rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem;
+}
+.risk-btn {
+  grid-column: auto;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.risk-btn:hover { background: transparent; color: var(--text); }
+.risk-btn.active { background: var(--accent); color: #04222f; }
+
+.ai-updated {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-status {
+  margin: 0 0 0.75rem;
+  min-height: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.ai-status:empty { display: none; }
+.ai-status.err { color: var(--err); }
+
+.ai-subtitle {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 0.5rem;
+}
+
+/* Summary: one bullet per stock — ticker, action badge, horizon. */
+.ai-summary { list-style: none; margin: 0; padding: 0; }
+.ai-summary li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+.ai-summary li.ai-empty {
+  color: var(--muted);
+  justify-content: center;
+  border-bottom: none;
+}
+.ai-summary .ai-ticker { font-weight: 700; }
+.ai-summary .ai-horizon { color: var(--muted); font-size: 0.8rem; }
+.ai-summary .ai-line {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+/* Action badge — colored by call: buy green, hold neutral, trim amber, sell red. */
+.ai-action {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.ai-action.buy  { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+.ai-action.hold { background: rgba(148, 163, 184, 0.18); color: var(--muted); }
+.ai-action.trim { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+.ai-action.sell { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+
+.ai-note {
+  margin: 0.9rem 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.ai-details-btn {
+  grid-column: auto;
+  width: 100%;
+  margin-top: 1rem;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.55rem 1rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ai-details-btn:hover { background: var(--bg); }
+
+.ai-back { margin-bottom: 0.5rem; padding-left: 0; }
+
+/* Details view — one card per stock with the ~10-line reasoning. */
+.ai-details { display: flex; flex-direction: column; gap: 1rem; }
+.ai-detail {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.9rem;
+  background: var(--bg);
+}
+.ai-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.ai-detail-head .ai-ticker { font-size: 1rem; font-weight: 700; }
+.ai-detail-head .ai-horizon { color: var(--muted); font-size: 0.78rem; }
+.ai-detail p { margin: 0.4rem 0 0; font-size: 0.85rem; line-height: 1.55; }
+.ai-detail .ai-reason { white-space: pre-line; }
+.ai-detail .ai-field-label {
+  display: block;
+  margin-top: 0.6rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.ai-detail .ai-trigger { color: var(--accent); }
+
+.ai-disclaimer {
+  margin: 1rem 0 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
 }

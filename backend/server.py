@@ -20,6 +20,9 @@ Endpoints:
                                body: {"ticker"}
   GET    /api/summary       -> dashboard totals               (read only)
                                total worth + realized + unrealized gains
+  GET    /api/ai            -> latest AI suggestions           (read only)
+                               summary + per-stock detail, low & high risk
+  POST   /api/ai/refresh    -> trigger a background regeneration of suggestions
 
 Static files (the web UI) are served from the frontend/ directory.
 Implemented with the Python standard library only — no dependencies.
@@ -51,6 +54,7 @@ def make_handler(
     wishlist: WishlistService,
     summary: SummaryService,
     market: MarketService,
+    advisor=None,
 ):
     """Build a request handler bound to the given service instances."""
 
@@ -69,6 +73,12 @@ def make_handler(
             elif self.path == "/api/wishlist":
                 # Enriched with live open/price + change and earnings dates.
                 self._send_json(200, {"wishlist": market.wishlist_view(wishlist_tickers())})
+            elif self.path == "/api/ai":
+                # Latest AI suggestions (cached); empty state if unconfigured.
+                if advisor is None:
+                    self._send_json(200, {"configured": False, "risk_profiles": None})
+                else:
+                    self._send_json(200, advisor.get())
             elif self.path in ("/", "/index.html"):
                 self._serve_static("index.html")
             elif self.path.lstrip("/") in ("style.css", "app.js"):
@@ -83,6 +93,10 @@ def make_handler(
                 self._handle_sell()
             elif self.path == "/api/wishlist":
                 self._handle_wishlist_add()
+            elif self.path == "/api/ai/refresh":
+                # Fire-and-forget: start a regeneration, report whether it began.
+                started = advisor.request_refresh() if advisor else False
+                self._send_json(200, {"started": started})
             else:
                 self._send_json(404, {"error": "Not found"})
 
@@ -183,10 +197,11 @@ def run_server(
     wishlist: WishlistService,
     summary: SummaryService,
     market: MarketService,
+    advisor=None,
     host: str = "127.0.0.1",
     port: int = 8000,
 ):
-    handler = make_handler(portfolio, wishlist, summary, market)
+    handler = make_handler(portfolio, wishlist, summary, market, advisor)
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"Stock assistant running at http://{host}:{port}")
     print("Press Ctrl+C to stop.")

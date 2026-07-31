@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
+.env
+.env.local
+*.key
 data/portfolio.json
 data/wishlist.json
 data/sales.json
+data/ai_suggestions.json
 data/*.tmp

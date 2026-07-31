@@ -3,6 +3,7 @@
 const STOCKS_API = "/api/stocks";
 const WISHLIST_API = "/api/wishlist";
 const SUMMARY_API = "/api/summary";
+const AI_API = "/api/ai";
 
 // --- Dashboard: total worth + realized/unrealized gains (read only) ----
 
@@ -647,7 +648,235 @@ function escapeHtml(str) {
 refreshBtn.addEventListener("click", loadSummary);
 refreshBtn.addEventListener("click", loadWishlist);
 
+// --- AI Advisor (read only) -------------------------------------------
+
+const aiUpdatedEl = document.getElementById("ai-updated");
+const aiStatusEl = document.getElementById("ai-status");
+const aiSummaryView = document.getElementById("ai-summary-view");
+const aiSummaryList = document.getElementById("ai-summary-list");
+const aiPortfolioNote = document.getElementById("ai-portfolio-note");
+const aiSeeDetailsBtn = document.getElementById("ai-see-details");
+const aiDetailsView = document.getElementById("ai-details-view");
+const aiDetailsList = document.getElementById("ai-details-list");
+const aiBackBtn = document.getElementById("ai-back");
+const aiRefreshBtn = document.getElementById("ai-refresh");
+const riskToggleEl = document.getElementById("risk-toggle");
+
+const AI_RISK_KEY = "stockagent.aiRisk";
+const DEFAULT_RISK = "low";
+
+let aiData = null;
+let aiPollTimer = null; // fast poll while a refresh is in flight
+
+// Map the model's action to a display label + color class.
+const AI_ACTIONS = {
+  buy: { label: "Buy more", cls: "buy" },
+  hold: { label: "Hold", cls: "hold" },
+  trim: { label: "Sell part", cls: "trim" },
+  sell: { label: "Sell all", cls: "sell" },
+};
+
+function getRisk() {
+  try {
+    return localStorage.getItem(AI_RISK_KEY) || DEFAULT_RISK;
+  } catch {
+    return DEFAULT_RISK;
+  }
+}
+function setRisk(risk) {
+  try {
+    localStorage.setItem(AI_RISK_KEY, risk);
+  } catch {
+    /* private mode — selection just won't persist */
+  }
+}
+
+async function loadAI() {
+  try {
+    const res = await fetch(AI_API);
+    aiData = await res.json();
+    renderAI();
+  } catch {
+    aiStatusEl.textContent = "Could not reach the AI API.";
+    aiStatusEl.className = "ai-status err";
+  }
+}
+
+function renderAI() {
+  if (!aiData) return;
+
+  // Highlight the active risk button.
+  const risk = getRisk();
+  riskToggleEl.querySelectorAll("[data-risk]").forEach((b) => {
+    b.classList.toggle("active", b.getAttribute("data-risk") === risk);
+  });
+
+  // Status line + last-updated stamp.
+  setAiStatus();
+  aiUpdatedEl.textContent = aiData.generated_at
+    ? `Updated ${fmtUpdated(aiData.generated_at)}`
+    : "—";
+
+  const profile =
+    (aiData.risk_profiles && aiData.risk_profiles[risk]) || null;
+  renderAiSummary(profile);
+  renderAiDetails(profile);
+
+  // Keep polling until a running refresh completes.
+  if (aiData.refreshing) startAiPoll();
+  else stopAiPoll();
+}
+
+function setAiStatus() {
+  aiStatusEl.className = "ai-status";
+  if (!aiData.configured) {
+    aiStatusEl.className = "ai-status err";
+    aiStatusEl.textContent =
+      "AI advisor is off — no model is configured. See the README to enable it.";
+  } else if (aiData.refreshing) {
+    aiStatusEl.textContent = "Thinking… generating fresh suggestions.";
+  } else if (aiData.error && !aiData.risk_profiles) {
+    aiStatusEl.className = "ai-status err";
+    aiStatusEl.textContent = aiData.error;
+  } else if (!aiData.risk_profiles) {
+    aiStatusEl.textContent = "No suggestions yet — hit Refresh to generate them.";
+  } else {
+    aiStatusEl.textContent = "";
+  }
+  aiRefreshBtn.disabled = !aiData.configured || aiData.refreshing;
+}
+
+// Summary: bullet per stock — ticker, action badge, horizon, one-line headline.
+function renderAiSummary(profile) {
+  const suggestions = (profile && profile.suggestions) || [];
+  if (!suggestions.length) {
+    aiSummaryList.innerHTML = `<li class="ai-empty">No suggestions yet.</li>`;
+    aiPortfolioNote.textContent = "";
+    aiSeeDetailsBtn.hidden = true;
+    return;
+  }
+  aiSummaryList.innerHTML = suggestions
+    .map((s) => {
+      const a = AI_ACTIONS[s.action] || AI_ACTIONS.hold;
+      return `<li>
+        <span class="ai-ticker">${escapeHtml(s.ticker)}</span>
+        <span class="ai-action ${a.cls}">${a.label}</span>
+        <span class="ai-horizon">${fmtHorizon(s.horizon_days)}</span>
+        ${s.headline ? `<span class="ai-line">${escapeHtml(s.headline)}</span>` : ""}
+      </li>`;
+    })
+    .join("");
+  aiPortfolioNote.textContent = (profile && profile.portfolio_note) || "";
+  aiSeeDetailsBtn.hidden = false;
+}
+
+// Details: one card per stock with the ~10-line reasoning, trigger, and risks.
+function renderAiDetails(profile) {
+  const suggestions = (profile && profile.suggestions) || [];
+  if (!suggestions.length) {
+    aiDetailsList.innerHTML = `<p class="ai-empty">No details yet.</p>`;
+    return;
+  }
+  aiDetailsList.innerHTML = suggestions
+    .map((s) => {
+      const a = AI_ACTIONS[s.action] || AI_ACTIONS.hold;
+      const trigger = s.price_trigger
+        ? `<span class="ai-field-label">Price trigger</span>
+           <p class="ai-trigger">${escapeHtml(s.price_trigger)}</p>`
+        : "";
+      const risks = s.risks
+        ? `<span class="ai-field-label">Main risk</span>
+           <p>${escapeHtml(s.risks)}</p>`
+        : "";
+      return `<div class="ai-detail">
+        <div class="ai-detail-head">
+          <span class="ai-ticker">${escapeHtml(s.ticker)}</span>
+          <span class="ai-action ${a.cls}">${a.label}</span>
+          <span class="ai-horizon">${fmtHorizon(s.horizon_days)}</span>
+        </div>
+        <p class="ai-reason">${escapeHtml(s.reasoning)}</p>
+        ${trigger}
+        ${risks}
+      </div>`;
+    })
+    .join("");
+}
+
+// "in how many days" — capped at a week by the backend.
+function fmtHorizon(days) {
+  const d = Number(days) || 1;
+  if (d >= 7) return "within a week";
+  if (d === 1) return "within 1 day";
+  return `within ${d} days`;
+}
+
+// A compact "updated" stamp: date + time, local.
+function fmtUpdated(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+// Risk toggle — re-render from the already-loaded data (no new API call).
+riskToggleEl.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-risk]");
+  if (!btn) return;
+  setRisk(btn.getAttribute("data-risk"));
+  renderAI();
+});
+
+// "See details" / "Back" switch the tab within the AI panel.
+aiSeeDetailsBtn.addEventListener("click", () => {
+  aiSummaryView.hidden = true;
+  aiDetailsView.hidden = false;
+});
+aiBackBtn.addEventListener("click", () => {
+  aiDetailsView.hidden = true;
+  aiSummaryView.hidden = false;
+});
+
+// Manual refresh: kick off a background regeneration, then poll for the result.
+aiRefreshBtn.addEventListener("click", async () => {
+  try {
+    const res = await fetch(`${AI_API}/refresh`, { method: "POST" });
+    const data = await res.json();
+    if (data.started) {
+      aiStatusEl.className = "ai-status";
+      aiStatusEl.textContent = "Thinking… generating fresh suggestions.";
+      aiRefreshBtn.disabled = true;
+      startAiPoll();
+    } else {
+      loadAI();
+    }
+  } catch {
+    aiStatusEl.textContent = "Could not reach the AI API.";
+    aiStatusEl.className = "ai-status err";
+  }
+});
+
+// While a refresh is running, poll every few seconds so the result appears
+// without a manual reload.
+function startAiPoll() {
+  if (aiPollTimer) return;
+  aiPollTimer = setInterval(loadAI, 5000);
+}
+function stopAiPoll() {
+  if (aiPollTimer) {
+    clearInterval(aiPollTimer);
+    aiPollTimer = null;
+  }
+}
+
+// Pick up scheduled (every-2h) refreshes without a reload.
+setInterval(loadAI, 120000);
+
 // initial load
 loadSummary();
 loadStocks();
 loadWishlist();
+loadAI();

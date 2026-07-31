@@ -13,6 +13,10 @@
       <p class="subtitle">Track your holdings and cost basis</p>
     </header>
 
+    <!-- Two columns: everything so far on the left, the AI advisor on the right. -->
+    <div class="layout">
+    <div class="main-col">
+
     <!-- DASHBOARD (read only) -->
     <section class="card dashboard">
       <!-- Total worth: sum of every holding's cost basis. Biggest text, green. -->
@@ -171,6 +175,56 @@
         </tbody>
       </table>
     </section>
+
+    </div><!-- /.main-col -->
+
+    <!-- AI ADVISOR (read only) — a daily agent's suggestions for the week. -->
+    <aside class="ai-col">
+      <section class="card ai-card">
+        <div class="ai-head">
+          <h2>🤖 AI Advisor</h2>
+          <button id="ai-refresh" class="secondary" type="button">Refresh</button>
+        </div>
+        <p class="hint">Weekly buy / hold / sell calls based on your holdings,
+          momentum, and the news. Refreshes every 2h during market hours.</p>
+
+        <div class="ai-controls">
+          <div id="risk-toggle" class="risk-toggle" role="group"
+            aria-label="Risk tolerance">
+            <button type="button" class="risk-btn" data-risk="low">Low risk</button>
+            <button type="button" class="risk-btn" data-risk="high">High risk</button>
+          </div>
+          <span id="ai-updated" class="ai-updated">—</span>
+        </div>
+
+        <p id="ai-status" class="ai-status" role="status"></p>
+
+        <!-- SUMMARY VIEW: the bullet-point calls at the very top. -->
+        <div id="ai-summary-view">
+          <span class="ai-subtitle">This week's calls</span>
+          <ul id="ai-summary-list" class="ai-summary">
+            <li class="ai-empty">No suggestions yet.</li>
+          </ul>
+          <p id="ai-portfolio-note" class="ai-note"></p>
+          <button id="ai-see-details" class="ai-details-btn" type="button" hidden>
+            See details →
+          </button>
+        </div>
+
+        <!-- DETAILS VIEW: the ~10-line reasoning per stock (a separate tab). -->
+        <div id="ai-details-view" hidden>
+          <button id="ai-back" class="link-btn ai-back" type="button">
+            ← Back to summary
+          </button>
+          <div id="ai-details-list" class="ai-details"></div>
+        </div>
+
+        <p class="ai-disclaimer">AI-generated. Not financial advice — verify
+          before you trade.</p>
+      </section>
+    </aside>
+
+    </div><!-- /.layout -->
   </main>
 
   <script src="app.js"></script>
