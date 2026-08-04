@@ -390,6 +390,7 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 }
 .ai-status:empty { display: none; }
 .ai-status.err { color: var(--err); }
+.ai-status.warn { color: #fbbf24; }
 
 .ai-subtitle {
   display: block;
@@ -440,6 +441,56 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 .ai-action.hold { background: rgba(148, 163, 184, 0.18); color: var(--muted); }
 .ai-action.trim { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
 .ai-action.sell { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+
+/* Consensus badge — did the two models land on the same call? Quieter than the
+   action badge: it qualifies the call rather than being the call. */
+.ai-consensus {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.ai-consensus.agree {
+  color: var(--muted);
+  border-color: var(--border);
+}
+.ai-consensus.split {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.4);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+/* Per-model breakdown inside a detail card. */
+.ai-votes {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.ai-votes li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+}
+.ai-votes .ai-vote-model {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.ai-votes .ai-horizon { color: var(--muted); font-size: 0.72rem; }
+.ai-votes .ai-line {
+  flex-basis: 100%;
+  color: var(--muted);
+  line-height: 1.45;
+}
 
 .ai-note {
   margin: 0.9rem 0 0;

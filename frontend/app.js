@@ -741,7 +741,22 @@ function setAiStatus() {
   } else if (!aiData.risk_profiles) {
     aiStatusEl.textContent = "No suggestions yet — hit Refresh to generate them.";
   } else {
-    aiStatusEl.textContent = "";
+    // Two models cross-check each other; say how much they agreed, and warn if
+    // one of them dropped out so a lone opinion isn't mistaken for a consensus.
+    const profile = aiData.risk_profiles[getRisk()];
+    const bits = [];
+    const ag = profile && profile.agreement;
+    if (ag && ag.total && (profile.models || []).length > 1) {
+      bits.push(
+        `${profile.models.length} models · ${ag.agreed}/${ag.total} agreed` +
+          (ag.split ? ` · ${ag.split} split` : ""),
+      );
+    }
+    if (aiData.model_errors && aiData.model_errors.length) {
+      bits.push(`${aiData.model_errors.length} model call(s) failed`);
+      aiStatusEl.className = "ai-status warn";
+    }
+    aiStatusEl.textContent = bits.join(" — ");
   }
   aiRefreshBtn.disabled = !aiData.configured || aiData.refreshing;
 }
@@ -761,6 +776,7 @@ function renderAiSummary(profile) {
       return `<li>
         <span class="ai-ticker">${escapeHtml(s.ticker)}</span>
         <span class="ai-action ${a.cls}">${a.label}</span>
+        ${consensusChip(s)}
         <span class="ai-horizon">${fmtHorizon(s.horizon_days)}</span>
         ${s.headline ? `<span class="ai-line">${escapeHtml(s.headline)}</span>` : ""}
       </li>`;
@@ -768,6 +784,41 @@ function renderAiSummary(profile) {
     .join("");
   aiPortfolioNote.textContent = (profile && profile.portfolio_note) || "";
   aiSeeDetailsBtn.hidden = false;
+}
+
+// A small badge showing whether the models agreed on this call. Only shown when
+// there were actually two opinions to compare.
+function consensusChip(s) {
+  if (s.consensus === "agree") {
+    return `<span class="ai-consensus agree" title="Both models chose this action">Both agree</span>`;
+  }
+  if (s.consensus === "split") {
+    const other = (s.votes || []).find((v) => v.action !== s.action);
+    const alt = other ? (AI_ACTIONS[other.action] || AI_ACTIONS.hold).label : "";
+    return `<span class="ai-consensus split" title="The models disagreed — see details">Split${
+      alt ? ` · other says ${escapeHtml(alt)}` : ""
+    }</span>`;
+  }
+  return "";
+}
+
+// Per-model breakdown, shown on the detail card when opinions were collected.
+function votesBlock(s) {
+  const votes = s.votes || [];
+  if (votes.length < 2) return "";
+  const rows = votes
+    .map((v) => {
+      const a = AI_ACTIONS[v.action] || AI_ACTIONS.hold;
+      return `<li>
+        <span class="ai-vote-model">${escapeHtml(v.model)}</span>
+        <span class="ai-action ${a.cls}">${a.label}</span>
+        <span class="ai-horizon">${fmtHorizon(v.horizon_days)}</span>
+        ${v.headline ? `<span class="ai-line">${escapeHtml(v.headline)}</span>` : ""}
+      </li>`;
+    })
+    .join("");
+  return `<span class="ai-field-label">What each model said</span>
+          <ul class="ai-votes">${rows}</ul>`;
 }
 
 // Details: one card per stock with the ~10-line reasoning, trigger, and risks.
@@ -792,11 +843,13 @@ function renderAiDetails(profile) {
         <div class="ai-detail-head">
           <span class="ai-ticker">${escapeHtml(s.ticker)}</span>
           <span class="ai-action ${a.cls}">${a.label}</span>
+          ${consensusChip(s)}
           <span class="ai-horizon">${fmtHorizon(s.horizon_days)}</span>
         </div>
         <p class="ai-reason">${escapeHtml(s.reasoning)}</p>
         ${trigger}
         ${risks}
+        ${votesBlock(s)}
       </div>`;
     })
     .join("");

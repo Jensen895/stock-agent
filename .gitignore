@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 .env
-.env.local
+.env.*
 *.key
 data/portfolio.json
 data/wishlist.json

@@ -49,11 +49,17 @@ from backend.ai_advisor import (
     AIAdvisorService,
     ClaudeClient,
     GeminiClient,
+    GroqClient,
     LlamaClient,
     OllamaClient,
 )
 from backend.market_data import MarketDataProvider
-from backend.news_data import NewsProvider
+from backend.news_data import (
+    CompositeNewsProvider,
+    FinnhubNewsProvider,
+    GoogleNewsRSSProvider,
+    YahooNewsProvider,
+)
 from backend.server import run_server
 from backend.service import (
     MarketService,
@@ -89,49 +95,86 @@ def main():
     # AI advisor: a daily agent that turns the portfolio + news into buy/hold/
     # sell suggestions for the week.
     #
-    # Provider is chosen by AI_PROVIDER (default "gemini" — Google's free public
-    # API, no card needed, generous quota, strong news grounding).
-    #   gemini (default): export GEMINI_API_KEY=... from
-    #                     https://aistudio.google.com/app/apikey
-    #                     optional: GEMINI_MODEL (default gemini-2.0-flash),
-    #                               GEMINI_API_BASE (default
-    #                               https://generativelanguage.googleapis.com/v1beta)
-    #                     free tier: 15 RPM / 1M TPM / 200-1000 RPD, 1M context,
-    #                     500 RPD Google Search grounding included.
-    #   llama:            export LLAMA_API_KEY="LLM|..."   (on VPN/corp network)
-    #                     key: https://www.internalfb.com/metagen/tools/llm-api-keys
-    #                     optional: LLAMA_MODEL, LLAMA_API_BASE
-    #   ollama:           ollama serve; ollama pull llama3.1   (local, no key)
-    #                     optional: OLLAMA_MODEL, OLLAMA_HOST
-    #   claude:           export ANTHROPIC_API_KEY=...        (public Claude API)
-    # News (optional, any provider): export FINNHUB_API_KEY=...  — without it
-    # suggestions run on price/history data alone.
-    provider = os.environ.get("AI_PROVIDER", "gemini").lower()
-    if provider == "claude":
-        llm = ClaudeClient(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-    elif provider == "ollama":
-        llm = OllamaClient(
-            host=os.environ.get("OLLAMA_HOST"),
-            model=os.environ.get("OLLAMA_MODEL", "llama3.1"),
-        )
-    elif provider == "llama":
-        llm = LlamaClient(
-            api_key=os.environ.get("LLAMA_API_KEY"),
-            model=os.environ.get("LLAMA_MODEL", "llama4-scout-17b-16e-instruct"),
-            base_url=os.environ.get("LLAMA_API_BASE", "https://api.llama.com"),
-        )
-    else:  # "gemini" — Google Gemini (free public API)
-        llm = GeminiClient(
-            api_key=os.environ.get("GEMINI_API_KEY"),
-            model=os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest"),
-            base_url=os.environ.get(
-                "GEMINI_API_BASE",
-                "https://generativelanguage.googleapis.com/v1beta",
-            ),
-        )
-    news = NewsProvider(api_key=os.environ.get("FINNHUB_API_KEY"))
+    # Two models are asked the same question every refresh and their answers are
+    # merged into a consensus, so the UI can flag where they disagree. The whole
+    # job is a handful of ~1.5k-token calls a day, which every free tier absorbs.
+    #
+    # AI_PROVIDER is a comma-separated priority list; the first one leads and
+    # supplies the prose. Any provider without a key is skipped, so the default
+    # works with a Gemini key alone (two different Gemini models) and picks up
+    # Groq automatically the moment GROQ_API_KEY appears.
+    #   gemini: export GEMINI_API_KEY=...  from https://aistudio.google.com/app/apikey
+    #           optional: GEMINI_MODEL, GEMINI_MODEL_B, GEMINI_API_BASE
+    #   groq:   export GROQ_API_KEY=...    from https://console.groq.com/keys
+    #           free tier, no credit card. optional: GROQ_MODEL, GROQ_API_BASE
+    #           (this is Groq the inference provider, not xAI's Grok)
+    #   llama:  export LLAMA_API_KEY="LLM|..."   (on VPN/corp network)
+    #           key: https://www.internalfb.com/metagen/tools/llm-api-keys
+    #   ollama: ollama serve; ollama pull llama3.1   (local, no key)
+    #   claude: export ANTHROPIC_API_KEY=...        (public Claude API)
+    #
+    # News needs no API key: Yahoo Finance first, Google News RSS as the
+    # fallback for tickers Yahoo has nothing on. Set FINNHUB_API_KEY to append
+    # Finnhub (richer summaries) as a last resort. Feeding real headlines is not
+    # optional — given none, the models invent confident, wrong ones.
+    def _build_client(name):
+        if name == "claude":
+            return ClaudeClient(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        if name == "ollama":
+            return OllamaClient(
+                host=os.environ.get("OLLAMA_HOST"),
+                model=os.environ.get("OLLAMA_MODEL", "llama3.1"),
+            )
+        if name == "llama":
+            return LlamaClient(
+                api_key=os.environ.get("LLAMA_API_KEY"),
+                model=os.environ.get("LLAMA_MODEL", "llama4-scout-17b-16e-instruct"),
+                base_url=os.environ.get("LLAMA_API_BASE", "https://api.llama.com"),
+            )
+        if name == "groq":
+            return GroqClient(
+                api_key=os.environ.get("GROQ_API_KEY"),
+                model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+                base_url=os.environ.get(
+                    "GROQ_API_BASE", "https://api.groq.com/openai/v1"
+                ),
+            )
+        if name in ("gemini", "gemini-b"):
+            # "gemini-b" is the second opinion: same key, a different model, so
+            # consensus works before you have a second provider's key.
+            default = (
+                "gemini-3.6-flash" if name == "gemini" else "gemini-3.5-flash-lite"
+            )
+            env = "GEMINI_MODEL" if name == "gemini" else "GEMINI_MODEL_B"
+            return GeminiClient(
+                api_key=os.environ.get("GEMINI_API_KEY"),
+                model=os.environ.get(env, default),
+                base_url=os.environ.get(
+                    "GEMINI_API_BASE",
+                    "https://generativelanguage.googleapis.com/v1beta",
+                ),
+            )
+        return None
+
+    names = [
+        n.strip().lower()
+        for n in os.environ.get("AI_PROVIDER", "gemini,groq,gemini-b").split(",")
+        if n.strip()
+    ]
+    llms = [c for c in (_build_client(n) for n in names) if c is not None]
+    # Keep at most two models: enough for a consensus, no reason to pay for more.
+    llms = [c for c in llms if c.available()][:2] or llms[:1]
+
+    news = CompositeNewsProvider(
+        [
+            YahooNewsProvider(),
+            GoogleNewsRSSProvider(),
+            FinnhubNewsProvider(api_key=os.environ.get("FINNHUB_API_KEY")),
+        ]
+    )
+    print(f"News: {news.describe()}")
     advisor = AIAdvisorService(
-        llm, news, market, portfolio, summary,
+        llms, news, market, portfolio, summary,
         storage=JSONStorage(AI_FILE), refresh_hours=2,
     )
     # Refreshes every two hours during market hours (and once on boot).

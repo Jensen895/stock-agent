@@ -40,13 +40,17 @@ everything goes through the API — so either side can be swapped independently.
 - **AI advisor layer** (`backend/ai_advisor.py`, `backend/news_data.py`) — a
   daily agent that composes the portfolio + market data with recent news and
   asks an LLM for weekly buy/hold/sell suggestions. The LLM is pluggable via
-  `AI_PROVIDER`: `GeminiClient` (Google's free public API, the default),
-  `LlamaClient` (Meta's internal Llama API), `OllamaClient` (a local model —
-  no key, nothing leaves the machine), or `ClaudeClient` (the public Claude
-  API). All four, plus `NewsProvider`, are I/O boundaries (stdlib `urllib`
-  only, like the market layer);
-  `AIAdvisorService` holds the logic and the every-2h refresh. Served over
-  `/api/ai`; degrades gracefully when the model or keys aren't available.
+  `AI_PROVIDER`: `GeminiClient` (Google's free API, the default),
+  `GroqClient` (Groq's free API), `LlamaClient` (Meta's internal Llama API),
+  `OllamaClient` (a local model — no key, nothing leaves the machine), or
+  `ClaudeClient` (the public Claude API). `AI_PROVIDER` takes a *list*, and
+  **two models are asked every refresh** so their answers can be cross-checked;
+  each suggestion is tagged `agree` / `split` / `single` and the UI flags
+  disagreement. News comes from `CompositeNewsProvider` — Yahoo Finance first,
+  Google News RSS as a fallback, **neither needing an API key**. Every client
+  and provider is an I/O boundary (stdlib `urllib` only, like the market
+  layer); `AIAdvisorService` holds the logic and the every-2h refresh. Served
+  over `/api/ai`; degrades gracefully when a model or key isn't available.
 
 ### Why it's flexible / reusable
 
@@ -196,7 +200,16 @@ for the week ahead. It sits in its own column on the right of everything else.
 - the current market price and today's move (momentum),
 - the full unrealized-gain history (1D / 1W / 1M / YTD / 1Y / Total),
 - realized gains from the sales log,
-- recent news headlines per ticker (from a finance-news API).
+- recent news headlines per ticker (Yahoo Finance, falling back to Google News
+  RSS — no API key needed for either).
+
+**Why the news matters.** The models are never asked to search; they are handed
+headlines. Two reasons. Free-tier Gemini *cannot* use Google Search grounding —
+adding the `google_search` tool makes the request fail outright with
+`429 RESOURCE_EXHAUSTED` while the same ungrounded request succeeds. And a model
+asked about "recent news" with none supplied does not say "I don't know": it
+invents specific, confident, wrong headlines. Real headlines are what keep the
+suggestions honest.
 
 **What it suggests** — for each holding: **buy more**, **hold**, **sell part**,
 or **sell all**, with a horizon of **at most a week**, a concrete price trigger
@@ -207,12 +220,25 @@ and the reasoning behind the call.
 **high-risk**; the toggle switches between them instantly with no new API call.
 Low risk prioritises protecting capital; high risk prioritises upside.
 
+**Consensus** — two models are asked the same question every refresh and their
+answers are merged per ticker. Where they pick the same action the call is
+marked **Both agree**; where they differ it is marked **Split** and the detail
+card shows what each model said. The first model in `AI_PROVIDER` leads and
+supplies the prose. This is affordable because the job is tiny — two risk
+profiles times two models, a few times a day, at roughly 1.5k input tokens a
+call — and all four calls run concurrently, so a refresh takes about 20s rather
+than the sum of its parts. If only one model is configured, suggestions are
+marked `single` and nothing else changes.
+
 **The UI**
 
-- A **summary** at the very top: one bullet per stock — ticker, the call, and in
-  how many days — plus a one-line rationale and an overall portfolio note.
+- A **summary** at the very top: one bullet per stock — ticker, the call, the
+  consensus badge, and in how many days — plus a one-line rationale and an
+  overall portfolio note. The status line reads e.g. "2 models · 2/3 agreed ·
+  1 split".
 - A **See details** button switches to a details tab: the ~10-line reasoning for
-  each stock, its price trigger, and its main risk. **Back to summary** returns.
+  each stock, its price trigger, its main risk, and the per-model breakdown.
+  **Back to summary** returns.
 
 **Refresh** — regenerates automatically **every two hours during US market
 hours** (and once on startup), and you can force a refresh with the button. The
@@ -224,14 +250,30 @@ instantly and survives restarts.
 ```jsonc
 {
   "configured": true,          // whether a model is configured (Ollama: always true)
-  "news_configured": true,     // false when FINNHUB_API_KEY isn't set
+  "models": ["gemini:gemini-3.6-flash", "groq:llama-3.3-70b-versatile"],
+  "news_configured": true,     // the keyless sources make this true by default
+  "news_sources": "Yahoo → GoogleNewsRSS",
   "refreshing": false,         // true while a regeneration is in flight
   "market_open": true,
   "refresh_hours": 2,
   "generated_at": "2026-07-30T14:00:00+00:00",
+  "model_errors": null,        // non-null if a model failed but others answered
   "risk_profiles": {
-    "low":  { "portfolio_note": "…", "suggestions": [ /* per stock */ ] },
-    "high": { "portfolio_note": "…", "suggestions": [ … ] }
+    "low": {
+      "portfolio_note": "…",
+      "models": ["gemini:gemini-3.6-flash", "groq:llama-3.3-70b-versatile"],
+      "agreement": { "agreed": 2, "split": 1, "total": 3 },
+      "suggestions": [
+        {
+          "ticker": "AAPL", "action": "trim", "horizon_days": 5,
+          "headline": "…", "reasoning": "…", "price_trigger": "…", "risks": "…",
+          "consensus": "agree",          // agree | split | single
+          "votes": [ { "model": "…", "action": "trim", "horizon_days": 5,
+                       "headline": "…" } ]
+        }
+      ]
+    },
+    "high": { … }
   },
   "error": null
 }
@@ -254,27 +296,63 @@ python3 run.py
 
 Then open http://127.0.0.1:8000 in your browser.
 
-**AI advisor (optional).** The advisor's LLM is pluggable via `AI_PROVIDER`.
-The default is **`gemini`** — Google's free public Gemini API (no credit card,
-generous quota, strong news grounding, package-free via stdlib `urllib`).
+**AI advisor (optional).** `AI_PROVIDER` is a comma-separated **priority list**;
+the first entry leads and supplies the prose, and the first two that actually
+have a key are used as the consensus pair. Anything without a key is skipped, so
+one key is enough to start.
 
-*Provider 1 — Google Gemini API (default, free).* No credit card, public:
+```bash
+AI_PROVIDER=gemini,groq,gemini-b     # the default
+```
+
+With only a Gemini key that resolves to `gemini` + `gemini-b` — two *different*
+Gemini models cross-checking each other. Add `GROQ_API_KEY` and Groq slots in
+as the second opinion automatically, giving you two independent vendors.
+
+Sizing note: this app makes roughly **8 model calls and ~15k tokens a day**.
+Every free tier below clears that by orders of magnitude, so choose on accuracy,
+not quota.
+
+*Provider 1 — Google Gemini API (default, free).* No credit card:
 
 ```bash
 # 1. Get a key: https://aistudio.google.com/app/apikey
 export GEMINI_API_KEY="AIza..."
-# Optional: GEMINI_MODEL (default gemini-2.0-flash), GEMINI_API_BASE
-#   - gemini-2.0-flash:        15 RPM / 1M TPM / 200 RPD  (balanced, default)
-#   - gemini-2.0-flash-lite:   30 RPM / 1M TPM / 200 RPD  (fastest RPM)
-#   - gemini-2.5-flash-lite:   15 RPM / 250K TPM / 1000 RPD (highest RPD)
-#   - Context: 1M tokens, supports Google Search grounding (500 RPD free)
+# Optional: GEMINI_MODEL   (default gemini-3.6-flash      — the lead)
+#           GEMINI_MODEL_B (default gemini-3.5-flash-lite — the second opinion)
 python3 run.py
 ```
+
+Free-tier request limits vary by model and change often — check
+<https://ai.google.dev/gemini-api/docs/rate-limits> rather than trusting a
+number written down here. Two things worth knowing:
+
+- **Google Search grounding is not usable on a free key.** Sending
+  `tools: [{"google_search": {}}]` returns `429 RESOURCE_EXHAUSTED` immediately
+  — a zero-quota entitlement, not burst limiting — while the identical
+  ungrounded request succeeds. This app therefore supplies headlines itself.
+- Model names come and go: `gemini-2.5-flash` now returns `404 … no longer
+  available to new users`. Use `models?key=…` to list what your key can see.
 
 Optional: `GEMINI_API_BASE` (default `https://generativelanguage.googleapis.com/v1beta`).
 For OpenAI-compatible mode: `GEMINI_API_BASE=https://generativelanguage.googleapis.com/v1beta/openai`.
 
-*Provider 2 — Meta Llama API (internal).* One-time setup, on the corp network / VPN:
+*Provider 2 — Groq API (free, recommended second opinion).* Free key, no credit
+card. Note this is **Groq**, the inference provider running open-weight models —
+not xAI's **Grok**, which has no comparable free tier:
+
+```bash
+# 1. Get a key: https://console.groq.com/keys
+export GROQ_API_KEY="gsk_..."
+export GROQ_MODEL="llama-3.3-70b-versatile"   # optional
+python3 run.py
+```
+
+Optional: `GROQ_API_BASE` (default `https://api.groq.com/openai/v1`). Groq
+retires models fairly often; if you get a 404 the error names the fix, and the
+current list is at <https://console.groq.com/docs/models>.
+
+*Provider 3 — Meta Llama API (internal).* One-time setup, on the corp network / VPN:
 
 ```bash
 AI_PROVIDER=llama
@@ -287,7 +365,7 @@ python3 run.py
 
 Optional: `LLAMA_API_BASE` (default `https://api.llama.com`). Must be on VPN.
 
-*Provider 3 — local model via Ollama* (`AI_PROVIDER=ollama`). Free, offline,
+*Provider 4 — local model via Ollama* (`AI_PROVIDER=ollama`). Free, offline,
 nothing leaves your machine:
 
 ```bash
@@ -300,7 +378,7 @@ AI_PROVIDER=ollama python3 run.py
 Optional: `OLLAMA_MODEL` (default `llama3.1`), `OLLAMA_HOST`
 (default `http://localhost:11434`).
 
-*Provider 4 — public Claude API* (`AI_PROVIDER=claude`):
+*Provider 5 — public Claude API* (`AI_PROVIDER=claude`):
 
 ```bash
 export AI_PROVIDER=claude
@@ -308,16 +386,28 @@ export ANTHROPIC_API_KEY=sk-ant-...
 python3 run.py
 ```
 
-**News (optional, any provider)** — a free Finnhub key adds news context; without
-it the advisor runs on your price and history data alone:
+**News — no key required.** The advisor pulls headlines from Yahoo Finance
+first, falling back to Google News RSS per ticker when Yahoo has nothing. Both
+are keyless, so news works out of the box.
+
+Yahoo pads thin results with unrelated market filler — ask it about a symbol it
+doesn't know and it returns generic business news — so headlines are kept only
+when Yahoo's own `relatedTickers` field tags them with your symbol. A ticker
+with no genuine coverage falls through to Google News rather than feeding the
+model noise.
+
+Optionally add Finnhub as a last-resort source (richer summaries, needs a free
+key):
 
 ```bash
 export FINNHUB_API_KEY=...
 ```
 
-Everything degrades gracefully: if the model isn't reachable the advisor column
-shows the error and the rest of the app works as before. Every client talks to
-its API over the standard library only — no SDK, matching the rest of the app.
+Everything degrades gracefully: one model failing still leaves the other's
+answer (marked `single`, with the failure reported in `model_errors`); every
+model failing leaves the last good suggestions on screen; a news outage leaves
+the advisor running on price and history alone. Every client talks to its API
+over the standard library only — no SDK, matching the rest of the app.
 
 Live prices, history, and earnings dates are fetched from Yahoo Finance, so an
 internet connection is needed for those. If the network (or Yahoo) is
