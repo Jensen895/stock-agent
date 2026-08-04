@@ -8,3 +8,5 @@ data/wishlist.json
 data/sales.json
 data/ai_suggestions.json
 data/*.tmp
+# Per-portfolio workspaces (holdings, wishlist, sales, AI suggestions) + registry
+data/portfolios/

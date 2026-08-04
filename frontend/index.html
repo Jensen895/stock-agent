@@ -11,6 +11,21 @@
     <header>
       <h1>📈 Personal Stock Assistant</h1>
       <p class="subtitle">Track your holdings and cost basis</p>
+
+      <!-- PORTFOLIO SWITCHER (top center) — pick, create, rename, or delete a
+           portfolio. Each portfolio is its own separate workspace; the app
+           reopens on whichever one you last used. -->
+      <div class="portfolio-bar">
+        <label for="portfolio-select" class="portfolio-label">Portfolio</label>
+        <select id="portfolio-select" aria-label="Select portfolio"></select>
+        <button id="portfolio-new" class="portfolio-btn" type="button"
+          title="Create a new portfolio">＋ New</button>
+        <button id="portfolio-rename" class="portfolio-btn" type="button"
+          title="Rename this portfolio">Rename</button>
+        <button id="portfolio-delete" class="portfolio-btn danger" type="button"
+          title="Delete this portfolio">Delete</button>
+      </div>
+      <p id="portfolio-message" class="message portfolio-message" role="status"></p>
     </header>
 
     <!-- Two columns: everything so far on the left, the AI advisor on the right. -->

@@ -662,7 +662,6 @@ const aiBackBtn = document.getElementById("ai-back");
 const aiRefreshBtn = document.getElementById("ai-refresh");
 const riskToggleEl = document.getElementById("risk-toggle");
 
-const AI_RISK_KEY = "stockagent.aiRisk";
 const DEFAULT_RISK = "low";
 
 let aiData = null;
@@ -676,19 +675,26 @@ const AI_ACTIONS = {
   sell: { label: "Sell all", cls: "sell" },
 };
 
+// The AI risk toggle is remembered per portfolio, server-side, so each
+// portfolio reopens on its own choice (and switching portfolios shows that
+// portfolio's setting). It rides along on the portfolio entry from
+// /api/portfolios; toggling persists it via /api/portfolios/risk.
 function getRisk() {
-  try {
-    return localStorage.getItem(AI_RISK_KEY) || DEFAULT_RISK;
-  } catch {
-    return DEFAULT_RISK;
-  }
+  const p = activePortfolio();
+  return (p && p.risk) || DEFAULT_RISK;
 }
 function setRisk(risk) {
-  try {
-    localStorage.setItem(AI_RISK_KEY, risk);
-  } catch {
-    /* private mode — selection just won't persist */
-  }
+  // Update the loaded state optimistically so the UI reacts instantly, then
+  // persist it to the active portfolio.
+  const p = activePortfolio();
+  if (p) p.risk = risk;
+  fetch(`${PORTFOLIOS_API}/risk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ risk }),
+  }).catch(() => {
+    /* offline — the optimistic choice still applies for this session */
+  });
 }
 
 async function loadAI() {
@@ -928,7 +934,158 @@ function stopAiPoll() {
 // Pick up scheduled (every-2h) refreshes without a reload.
 setInterval(loadAI, 120000);
 
+// --- Portfolios (switch / create / rename / delete) -------------------
+//
+// Each portfolio is a separate workspace on the server; the active one is
+// remembered server-side, so the app reopens on whichever you last used. All we
+// do here is drive the dropdown and reload every panel when the active
+// portfolio changes.
+
+const PORTFOLIOS_API = "/api/portfolios";
+
+const portfolioSelect = document.getElementById("portfolio-select");
+const portfolioNewBtn = document.getElementById("portfolio-new");
+const portfolioRenameBtn = document.getElementById("portfolio-rename");
+const portfolioDeleteBtn = document.getElementById("portfolio-delete");
+const portfolioMsg = document.getElementById("portfolio-message");
+
+let portfolioState = null; // { active, portfolios: [{id, name, active}] }
+
+async function loadPortfolios() {
+  try {
+    const res = await fetch(PORTFOLIOS_API);
+    portfolioState = await res.json();
+    renderPortfolios();
+  } catch {
+    setMessage(portfolioMsg, "Could not load portfolios.", "err");
+  }
+}
+
+function renderPortfolios() {
+  const list = (portfolioState && portfolioState.portfolios) || [];
+  const active = portfolioState && portfolioState.active;
+  portfolioSelect.innerHTML = list
+    .map(
+      (p) =>
+        `<option value="${escapeHtml(p.id)}"${
+          p.id === active ? " selected" : ""
+        }>${escapeHtml(p.name)}</option>`
+    )
+    .join("");
+  // Can't delete your only portfolio — disable the button to make that clear.
+  portfolioDeleteBtn.disabled = list.length <= 1;
+
+  // The AI risk toggle is per-portfolio; now that the active portfolio (and its
+  // saved risk) is known, refresh the AI panel so it shows the right profile —
+  // covers the case where the AI data loaded before the portfolio list did.
+  if (aiData) renderAI();
+}
+
+// Return the entry for the currently active portfolio (for prefilling rename).
+function activePortfolio() {
+  const list = (portfolioState && portfolioState.portfolios) || [];
+  return list.find((p) => p.id === portfolioState.active) || null;
+}
+
+// Reload every panel — used after the active portfolio changes so the whole UI
+// reflects the newly active workspace.
+function reloadAllPanels() {
+  loadSummary();
+  loadStocks();
+  loadWishlist();
+  loadAI();
+}
+
+// Small POST helper for the portfolio endpoints: sends JSON, applies the
+// returned state, and reports errors. Returns true on success.
+async function portfolioRequest(url, body, method = "POST") {
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setMessage(portfolioMsg, data.error || "Something went wrong.", "err");
+      return false;
+    }
+    if (data.state) {
+      portfolioState = data.state;
+      renderPortfolios();
+    }
+    return true;
+  } catch {
+    setMessage(portfolioMsg, "Could not reach the API.", "err");
+    return false;
+  }
+}
+
+// Switch when the dropdown changes.
+portfolioSelect.addEventListener("change", async () => {
+  setMessage(portfolioMsg, "", "");
+  const id = portfolioSelect.value;
+  if (await portfolioRequest(`${PORTFOLIOS_API}/switch`, { id })) {
+    const p = activePortfolio();
+    setMessage(portfolioMsg, `Switched to ${p ? p.name : "portfolio"}.`, "ok");
+    reloadAllPanels();
+  } else {
+    renderPortfolios(); // revert the <select> to the real active portfolio
+  }
+});
+
+// Create a new portfolio (the server switches to it).
+portfolioNewBtn.addEventListener("click", async () => {
+  setMessage(portfolioMsg, "", "");
+  const name = (prompt("Name your new portfolio:", "") || "").trim();
+  if (!name) return;
+  if (await portfolioRequest(PORTFOLIOS_API, { name })) {
+    setMessage(portfolioMsg, `Created and switched to ${name}.`, "ok");
+    reloadAllPanels();
+  }
+});
+
+// Rename the active portfolio.
+portfolioRenameBtn.addEventListener("click", async () => {
+  setMessage(portfolioMsg, "", "");
+  const current = activePortfolio();
+  if (!current) return;
+  const name = (prompt("Rename this portfolio:", current.name) || "").trim();
+  if (!name || name === current.name) return;
+  if (await portfolioRequest(`${PORTFOLIOS_API}/rename`, { id: current.id, name })) {
+    setMessage(portfolioMsg, `Renamed to ${name}.`, "ok");
+  }
+});
+
+// Delete the active portfolio (archived server-side, then the app moves to
+// another portfolio).
+portfolioDeleteBtn.addEventListener("click", async () => {
+  setMessage(portfolioMsg, "", "");
+  const current = activePortfolio();
+  if (!current) return;
+  if (
+    !confirm(
+      `Delete the "${current.name}" portfolio? Its holdings, wishlist, and ` +
+        `history will be removed from the app.`
+    )
+  ) {
+    return;
+  }
+  if (
+    await portfolioRequest(PORTFOLIOS_API, { id: current.id }, "DELETE")
+  ) {
+    const p = activePortfolio();
+    setMessage(
+      portfolioMsg,
+      `Deleted "${current.name}". Now on ${p ? p.name : "another portfolio"}.`,
+      "ok"
+    );
+    reloadAllPanels();
+  }
+});
+
 // initial load
+loadPortfolios();
 loadSummary();
 loadStocks();
 loadWishlist();

@@ -68,24 +68,32 @@ from backend.service import (
     SummaryService,
     WishlistService,
 )
-from backend.storage import JSONStorage
+from backend.workspace import WorkspaceManager, WorkspaceStorage
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-PORTFOLIO_FILE = os.path.join(DATA_DIR, "portfolio.json")
-WISHLIST_FILE = os.path.join(DATA_DIR, "wishlist.json")
-SALES_FILE = os.path.join(DATA_DIR, "sales.json")
-AI_FILE = os.path.join(DATA_DIR, "ai_suggestions.json")
+PORTFOLIOS_DIR = os.path.join(DATA_DIR, "portfolios")
 
 
 def main():
+    # Multiple portfolios: each is its own self-contained workspace (holdings,
+    # wishlist, sales, AI suggestions). The manager tracks which one is active
+    # and persists that choice, so the app reopens on the portfolio you last
+    # used. WorkspaceStorage redirects every table to the active portfolio's
+    # files — switching portfolios repoints all the services below at once, with
+    # no rewiring. (Legacy single-portfolio data under data/ is migrated in on
+    # first run.)
+    manager = WorkspaceManager(PORTFOLIOS_DIR)
+
     # <- swap storage backends here. Holdings, wishlist, and the sales log are
-    # separate tables.
-    portfolio_storage = JSONStorage(PORTFOLIO_FILE)
+    # separate tables, each scoped to the active portfolio.
+    portfolio_storage = WorkspaceStorage(manager, "portfolio.json")
     # sales log: every sell is recorded here so realized gains can be summed.
-    sales = SalesService(JSONStorage(SALES_FILE))
+    sales = SalesService(WorkspaceStorage(manager, "sales.json"))
     portfolio = PortfolioService(portfolio_storage, sales=sales)
     # wishlist also reads holdings so it can reject stocks you already own.
-    wishlist = WishlistService(JSONStorage(WISHLIST_FILE), holdings=portfolio_storage)
+    wishlist = WishlistService(
+        WorkspaceStorage(manager, "wishlist.json"), holdings=portfolio_storage
+    )
     # live market data (Yahoo Finance) — powers real prices, unrealized gains,
     # and earnings dates. Swap this provider to change data sources.
     market = MarketService(MarketDataProvider(), portfolio)
@@ -175,12 +183,12 @@ def main():
     print(f"News: {news.describe()}")
     advisor = AIAdvisorService(
         llms, news, market, portfolio, summary,
-        storage=JSONStorage(AI_FILE), refresh_hours=2,
+        storage=WorkspaceStorage(manager, "ai_suggestions.json"), refresh_hours=2,
     )
     # Refreshes every two hours during market hours (and once on boot).
     advisor.start_scheduler()
 
-    run_server(portfolio, wishlist, summary, market, advisor,
+    run_server(portfolio, wishlist, summary, market, advisor, manager,
                host="127.0.0.1", port=8000)
 
 

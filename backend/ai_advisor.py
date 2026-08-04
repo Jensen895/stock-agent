@@ -879,6 +879,15 @@ class AIAdvisorService:
             "error": latest.get("error") if latest else None,
         }
 
+    def reload(self) -> None:
+        """Re-read persisted suggestions for the now-active portfolio.
+
+        Called after the active portfolio is switched or deleted: the cached
+        ``_latest`` belongs to the old portfolio, so drop it and load whatever
+        the new one has (which may be nothing yet)."""
+        with self._lock:
+            self._latest = self._load_persisted()
+
     def request_refresh(self) -> bool:
         """Kick off a background regeneration. Returns False if one is running
         or the advisor isn't configured (nothing to do)."""

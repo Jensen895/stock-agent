@@ -23,6 +23,17 @@ Endpoints:
   GET    /api/ai            -> latest AI suggestions           (read only)
                                summary + per-stock detail, low & high risk
   POST   /api/ai/refresh    -> trigger a background regeneration of suggestions
+  GET    /api/portfolios    -> list portfolios + which is active (read only)
+  POST   /api/portfolios    -> create a new portfolio (and switch to it) (write)
+                               body: {"name"}
+  POST   /api/portfolios/switch -> switch the active portfolio     (write)
+                               body: {"id"}
+  POST   /api/portfolios/rename -> rename a portfolio              (write)
+                               body: {"id","name"}
+  POST   /api/portfolios/risk   -> remember the AI risk toggle     (write)
+                               body: {"risk"}   (for the active portfolio)
+  DELETE /api/portfolios    -> delete (archive) a portfolio        (write)
+                               body: {"id"}
 
 Static files (the web UI) are served from the frontend/ directory.
 Implemented with the Python standard library only — no dependencies.
@@ -39,6 +50,7 @@ from backend.service import (
     WishlistService,
     ValidationError,
 )
+from backend.workspace import WorkspaceError
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 
@@ -55,6 +67,7 @@ def make_handler(
     summary: SummaryService,
     market: MarketService,
     advisor=None,
+    workspace=None,
 ):
     """Build a request handler bound to the given service instances."""
 
@@ -79,6 +92,12 @@ def make_handler(
                     self._send_json(200, {"configured": False, "risk_profiles": None})
                 else:
                     self._send_json(200, advisor.get())
+            elif self.path == "/api/portfolios":
+                # Every portfolio + which one is active (the app's "memory").
+                if workspace is None:
+                    self._send_json(200, {"portfolios": [], "active": None})
+                else:
+                    self._send_json(200, workspace.state())
             elif self.path in ("/", "/index.html"):
                 self._serve_static("index.html")
             elif self.path.lstrip("/") in ("style.css", "app.js"):
@@ -97,6 +116,14 @@ def make_handler(
                 # Fire-and-forget: start a regeneration, report whether it began.
                 started = advisor.request_refresh() if advisor else False
                 self._send_json(200, {"started": started})
+            elif self.path == "/api/portfolios":
+                self._handle_portfolio_create()
+            elif self.path == "/api/portfolios/switch":
+                self._handle_portfolio_switch()
+            elif self.path == "/api/portfolios/rename":
+                self._handle_portfolio_rename()
+            elif self.path == "/api/portfolios/risk":
+                self._handle_portfolio_risk()
             else:
                 self._send_json(404, {"error": "Not found"})
 
@@ -105,6 +132,8 @@ def make_handler(
                 self._handle_delete()
             elif self.path == "/api/wishlist":
                 self._handle_wishlist_remove()
+            elif self.path == "/api/portfolios":
+                self._handle_portfolio_delete()
             else:
                 self._send_json(404, {"error": "Not found"})
 
@@ -143,13 +172,60 @@ def make_handler(
                 return {"removed": wishlist.remove(ticker=body.get("ticker"))}
             self._run(action)
 
+        # --- portfolio (workspace) handlers -----------------------------
+        #
+        # Each portfolio is a separate workspace; switching repoints all the
+        # storage above at once. The AI advisor caches its suggestions in
+        # memory, so after any change to the *active* portfolio we tell it to
+        # reload from the now-active portfolio's file.
+
+        def _handle_portfolio_create(self):
+            def action(body):
+                entry = workspace.create(name=body.get("name"))
+                self._reload_advisor()  # create() switches to the new portfolio
+                return {"portfolio": entry, "state": workspace.state()}
+            self._run(action)
+
+        def _handle_portfolio_switch(self):
+            def action(body):
+                workspace.switch(pid=body.get("id"))
+                self._reload_advisor()
+                return {"state": workspace.state()}
+            self._run(action)
+
+        def _handle_portfolio_rename(self):
+            def action(body):
+                entry = workspace.rename(pid=body.get("id"), name=body.get("name"))
+                return {"portfolio": entry, "state": workspace.state()}
+            self._run(action)
+
+        def _handle_portfolio_risk(self):
+            # Persist the AI-advisor risk toggle for the active portfolio. No
+            # advisor reload needed — both risk profiles are already generated;
+            # this only remembers which one to show.
+            def action(body):
+                risk = workspace.set_risk(risk=body.get("risk"))
+                return {"risk": risk, "state": workspace.state()}
+            self._run(action)
+
+        def _handle_portfolio_delete(self):
+            def action(body):
+                workspace.delete(pid=body.get("id"))
+                self._reload_advisor()  # delete() may move the active pointer
+                return {"state": workspace.state()}
+            self._run(action)
+
+        def _reload_advisor(self):
+            if advisor is not None:
+                advisor.reload()
+
         def _run(self, action):
             """Read the JSON body, run a write action, and send its result.
             Centralizes the shared validation/error handling for all writes."""
             try:
                 body = self._read_json_body()
                 payload = action(body)
-            except ValidationError as e:
+            except (ValidationError, WorkspaceError) as e:
                 self._send_json(400, {"error": str(e)})
             except (json.JSONDecodeError, TypeError):
                 self._send_json(400, {"error": "Invalid request body."})
@@ -198,10 +274,11 @@ def run_server(
     summary: SummaryService,
     market: MarketService,
     advisor=None,
+    workspace=None,
     host: str = "127.0.0.1",
     port: int = 8000,
 ):
-    handler = make_handler(portfolio, wishlist, summary, market, advisor)
+    handler = make_handler(portfolio, wishlist, summary, market, advisor, workspace)
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"Stock assistant running at http://{host}:{port}")
     print("Press Ctrl+C to stop.")

@@ -32,6 +32,15 @@ everything goes through the API — so either side can be swapped independently.
   and computes real unrealized gains. Independent of UI and storage.
 - **Storage layer** (`backend/storage/`) — an abstract `StorageBackend`
   interface plus a local `JSONStorage` implementation.
+- **Portfolios layer** (`backend/workspace.py`) — lets you keep several separate
+  portfolios (holdings + wishlist + sales + AI suggestions each), switch between
+  them, and name/create/delete them. `WorkspaceManager` tracks which portfolio is
+  active and **persists that choice**, so the app reopens on whichever one you
+  last used. `WorkspaceStorage` is a `StorageBackend` that redirects every read/
+  write to the *active* portfolio's files, so switching portfolios repoints every
+  service at once with no rewiring — and no two portfolios ever mix. Served over
+  `/api/portfolios`. Deleted portfolios are archived (moved to
+  `data/portfolios/_archive/`), never erased.
 - **Market data layer** (`backend/market_data.py`) — `MarketDataProvider`, an
   I/O boundary onto Yahoo Finance's public endpoints (stdlib `urllib` only). Like
   storage, it's swappable: implement the same methods against another data
@@ -413,5 +422,31 @@ Live prices, history, and earnings dates are fetched from Yahoo Finance, so an
 internet connection is needed for those. If the network (or Yahoo) is
 unavailable, the app still runs — live fields just show "—" until it recovers.
 
-Holdings are stored locally in `data/portfolio.json`, the wishlist in
-`data/wishlist.json`, and the sales log in `data/sales.json` — separate tables.
+Holdings, wishlist, sales log, and AI suggestions are stored locally, one set
+per portfolio, under `data/portfolios/<id>/` (`portfolio.json`, `wishlist.json`,
+`sales.json`, `ai_suggestions.json`) — separate tables. Which portfolios exist
+and which one is active live in `data/portfolios/index.json`. Older single-
+portfolio installs (with the files directly under `data/`) are migrated into a
+first **"My Portfolio"** automatically on first launch, so no history is lost.
+
+### Portfolios
+
+Keep several separate portfolios and switch between them from the dropdown at the
+top center of the page. Each is its own workspace — holdings, wishlist, sales,
+and AI suggestions never mix — and every action is saved immediately. The app
+remembers the portfolio you were last viewing and reopens on it. Each portfolio
+also remembers **its own AI-advisor risk toggle** (low / high), so switching
+portfolios restores that portfolio's setting.
+
+| Method | Path                      | Purpose                                | Body            |
+| ------ | ------------------------- | -------------------------------------- | --------------- |
+| GET    | `/api/portfolios`         | List portfolios (+ active, + risk)     | —               |
+| POST   | `/api/portfolios`         | Create a new portfolio (and switch)    | `{"name"}`      |
+| POST   | `/api/portfolios/switch`  | Switch the active portfolio            | `{"id"}`        |
+| POST   | `/api/portfolios/rename`  | Rename a portfolio                     | `{"id","name"}` |
+| POST   | `/api/portfolios/risk`    | Remember the AI risk toggle (active)   | `{"risk"}`      |
+| DELETE | `/api/portfolios`         | Delete (archive) a portfolio           | `{"id"}`        |
+
+You can't delete your only portfolio. Deleting the active one moves you to
+another; the deleted portfolio's data is archived under
+`data/portfolios/_archive/`, not erased.
