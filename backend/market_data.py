@@ -13,7 +13,13 @@ standard library only — no third-party packages, matching the rest of the app.
                                           drives the unrealized-gains graph.
   - crumb   (v1/test/getcrumb)         -> a token, obtained via a cookie, that
                                           the quoteSummary endpoint now requires.
-  - summary (v10/finance/quoteSummary) -> the next scheduled earnings date.
+  - summary (v10/finance/quoteSummary) -> the next scheduled earnings date, and
+                                          (for ``analyst_data.py``) the Wall
+                                          Street ratings modules.
+
+``fetch_quote_summary`` is deliberately public: quoteSummary is the one endpoint
+that needs a crumb, and minting one costs a cookie round-trip, so other Yahoo
+providers compose this class instead of duplicating that dance.
 
 Robustness (Yahoo is unofficial and rate-limits aggressively):
   - a cookie session + browser-like User-Agent,
@@ -49,6 +55,7 @@ _USER_AGENT = "Mozilla/5.0"
 _TTL_INTRADAY = 60        # seconds — current price + today's minute-by-minute
 _TTL_DAILY = 3600         # seconds — daily closes for the "total" graph
 _TTL_EARNINGS = 21600     # seconds (6h) — next earnings date
+_TTL_SUMMARY = 21600      # seconds (6h) — default for other quoteSummary modules
 
 # Fetch this much daily history for the long-horizon ("total") graph.
 _TOTAL_RANGE = "1y"
@@ -132,6 +139,49 @@ class MarketDataProvider:
         """Fetch several earnings dates concurrently. {ticker: iso-date-or-None}."""
         return self._parallel(self.get_earnings_date, tickers)
 
+    def fetch_quote_summary(self, ticker: str, modules, ttl: int = _TTL_SUMMARY):
+        """Fetch one or more Yahoo ``quoteSummary`` modules for a ticker.
+
+        ``modules`` is a list of module names (e.g. ``["financialData",
+        "recommendationTrend"]``); the return value is the result object keyed
+        by module name, or None if it couldn't be fetched.
+
+        Public because quoteSummary is the crumb-protected endpoint: any other
+        provider that needs it (``analyst_data.py``) reuses this session rather
+        than minting a second crumb of its own. Cached per (ticker, modules).
+        """
+        ticker = ticker.upper()
+        names = sorted(modules)
+        cache_key = ("summary", ticker, ",".join(names))
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached or None  # cached "" means "tried, failed"
+
+        result = self._fetch_quote_summary(ticker, names)
+        # Cache failures briefly so a flaky moment doesn't wedge every request.
+        self._cache_set(cache_key, result or "", ttl if result else 60)
+        return result
+
+    def _fetch_quote_summary(self, ticker: str, names):
+        # A crumb goes stale after a while and Yahoo then rejects the request,
+        # so on a miss mint a fresh one and try exactly once more.
+        for attempt in range(2):
+            crumb = self._get_crumb()
+            if not crumb:
+                return None
+            params = urllib.parse.urlencode(
+                {"modules": ",".join(names), "crumb": crumb}
+            )
+            url = _SUMMARY_URL.format(ticker=urllib.parse.quote(ticker))
+            data = self._fetch_json(url + "?" + params)
+            if data:
+                try:
+                    return data["quoteSummary"]["result"][0]
+                except (KeyError, IndexError, TypeError):
+                    return None
+            self._crumb = None
+        return None
+
     # --- chart fetch + parse -------------------------------------------
 
     def _chart(self, ticker: str, rng: str, interval: str, ttl: int):
@@ -205,20 +255,14 @@ class MarketDataProvider:
     # --- earnings fetch -------------------------------------------------
 
     def _fetch_earnings_date(self, ticker: str):
-        crumb = self._get_crumb()
-        if not crumb:
-            return None
-        params = urllib.parse.urlencode(
-            {"modules": "calendarEvents", "crumb": crumb}
+        result = self.fetch_quote_summary(
+            ticker, ["calendarEvents"], ttl=_TTL_EARNINGS
         )
-        url = _SUMMARY_URL.format(ticker=urllib.parse.quote(ticker.upper()))
-        data = self._fetch_json(url + "?" + params)
-        if not data:
+        if not result:
             return None
         try:
-            events = data["quoteSummary"]["result"][0]["calendarEvents"]["earnings"]
-            raw_dates = events.get("earningsDate") or []
-        except (KeyError, IndexError, TypeError):
+            raw_dates = result["calendarEvents"]["earnings"].get("earningsDate") or []
+        except (KeyError, TypeError):
             return None
         return self._pick_upcoming(raw_dates)
 

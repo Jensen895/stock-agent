@@ -193,15 +193,20 @@
 
     </div><!-- /.main-col -->
 
-    <!-- AI ADVISOR (read only) — a daily agent's suggestions for the week. -->
+    <!-- AI ADVISOR (read only) — the agent's one-to-three-month outlook. -->
     <aside class="ai-col">
       <section class="card ai-card">
         <div class="ai-head">
           <h2>🤖 AI Advisor</h2>
           <button id="ai-refresh" class="secondary" type="button">Refresh</button>
         </div>
-        <p class="hint">Weekly buy / hold / sell calls based on your holdings,
-          momentum, and the news. Refreshes every 2h during market hours.</p>
+        <p class="hint">A confidence score per holding for the next one to
+          three months, averaged from two AI models. Each reads your holdings,
+          momentum, company fundamentals, the news, <em>and</em> what Wall
+          Street says — the consensus rating, how far the analysts disagree,
+          and who upgraded or downgraded — then reaches its own number. The
+          firms don't get a vote; the models weigh them. Refreshes every 2h
+          during market hours.</p>
 
         <div class="ai-controls">
           <div id="risk-toggle" class="risk-toggle" role="group"
@@ -216,7 +221,17 @@
 
         <!-- SUMMARY VIEW: the bullet-point calls at the very top. -->
         <div id="ai-summary-view">
-          <span class="ai-subtitle">This week's calls</span>
+          <span class="ai-subtitle">The next quarter's calls</span>
+
+          <!-- What the number means: 0 sell … 50 hold … 100 buy. -->
+          <div class="ai-legend" aria-hidden="true">
+            <span class="ai-legend-end neg">0 · sell</span>
+            <span class="ai-legend-bar left"></span>
+            <span class="ai-legend-mid">50 · hold</span>
+            <span class="ai-legend-bar right"></span>
+            <span class="ai-legend-end pos">buy · 100</span>
+          </div>
+
           <ul id="ai-summary-list" class="ai-summary">
             <li class="ai-empty">No suggestions yet.</li>
           </ul>

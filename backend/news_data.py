@@ -36,10 +36,13 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-# How far back to look for headlines, and how many to keep per ticker. A week of
-# context is plenty for a suggestion horizon that is itself capped at a week.
-_LOOKBACK_DAYS = 7
-_MAX_HEADLINES = 6
+# How far back to look for headlines, and how many to keep per ticker. The
+# advisor reasons over the next one to three months, so a month of context is
+# the right match — a week's worth would weight whatever happened to break in
+# the last few days far above the quarter's actual story. Headlines are still
+# capped per ticker, newest first, to keep the prompt small.
+_LOOKBACK_DAYS = 30
+_MAX_HEADLINES = 8
 
 # Headlines barely change minute to minute; cache for a while to keep the number
 # of outbound requests small even if the advisor is refreshed often.

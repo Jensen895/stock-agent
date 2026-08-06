@@ -488,55 +488,265 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 .ai-action.trim { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
 .ai-action.sell { background: rgba(248, 113, 113, 0.15); color: var(--err); }
 
-/* Consensus badge — did the two models land on the same call? Quieter than the
-   action badge: it qualifies the call rather than being the call. */
-.ai-consensus {
-  display: inline-block;
-  padding: 0.1rem 0.45rem;
-  border-radius: 999px;
-  font-size: 0.62rem;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  white-space: nowrap;
+/* --- Confidence score ------------------------------------------------- */
+/* The 0-100 blend of the three sources. The pill is the headline number; the
+   meter shows how far the call sits from the neutral 50 = hold midpoint. */
+
+.ai-score {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.1rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 7px;
   border: 1px solid transparent;
+  font-size: 0.85rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
-.ai-consensus.agree {
-  color: var(--muted);
-  border-color: var(--border);
+.ai-score.lg { min-width: 2.5rem; font-size: 1.05rem; padding: 0.15rem 0.5rem; }
+.ai-score.sm { min-width: 1.8rem; font-size: 0.72rem; font-weight: 700; }
+.ai-score.buy {
+  background: rgba(74, 222, 128, 0.16);
+  border-color: rgba(74, 222, 128, 0.35);
+  color: var(--ok);
 }
-.ai-consensus.split {
+.ai-score.hold {
+  background: rgba(148, 163, 184, 0.16);
+  border-color: rgba(148, 163, 184, 0.3);
+  color: var(--text);
+}
+.ai-score.trim {
+  background: rgba(251, 191, 36, 0.16);
+  border-color: rgba(251, 191, 36, 0.35);
   color: #fbbf24;
-  border-color: rgba(251, 191, 36, 0.4);
-  background: rgba(251, 191, 36, 0.08);
+}
+.ai-score.sell {
+  background: rgba(248, 113, 113, 0.16);
+  border-color: rgba(248, 113, 113, 0.35);
+  color: var(--err);
 }
 
-/* Per-model breakdown inside a detail card. */
-.ai-votes {
+/* Score meter: a full-width track from 0 (sell) to 100 (buy), with a tick at
+   the neutral midpoint and a dot at the score. */
+.ai-meter {
+  flex-basis: 100%;
+  position: relative;
+  height: 4px;
+  margin: 0.35rem 0 0.15rem;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    rgba(248, 113, 113, 0.35),
+    rgba(148, 163, 184, 0.25) 50%,
+    rgba(74, 222, 128, 0.35)
+  );
+}
+.ai-meter-mid {
+  position: absolute;
+  left: 50%;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--border);
+}
+.ai-meter-dot {
+  position: absolute;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 2px var(--card);
+  background: var(--muted);
+}
+.ai-meter-dot.buy { background: var(--ok); }
+.ai-meter-dot.hold { background: var(--muted); }
+.ai-meter-dot.trim { background: #fbbf24; }
+.ai-meter-dot.sell { background: var(--err); }
+/* Inside a detail card the surrounding surface is --bg, so match the halo. */
+.ai-detail .ai-meter-dot { box-shadow: 0 0 0 2px var(--bg); }
+
+/* Legend above the calls: what the number means. */
+.ai-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.ai-legend-bar {
+  flex: 1;
+  height: 3px;
+  border-radius: 999px;
+}
+/* Red fading to neutral on the sell side, neutral to green on the buy side. */
+.ai-legend-bar.left {
+  background: linear-gradient(
+    to right,
+    rgba(248, 113, 113, 0.4),
+    rgba(148, 163, 184, 0.3)
+  );
+}
+.ai-legend-bar.right {
+  background: linear-gradient(
+    to right,
+    rgba(148, 163, 184, 0.3),
+    rgba(74, 222, 128, 0.4)
+  );
+}
+.ai-legend-end.pos { color: var(--ok); }
+.ai-legend-end.neg { color: var(--err); }
+.ai-legend-mid { color: var(--muted); }
+
+/* The three numbers behind the average: AI model A, AI model B, Wall Street.
+   Deliberately smaller and quieter than the blended score — they explain where
+   it came from rather than competing with it. */
+.ai-minis {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.ai-mini {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.15rem;
+}
+.ai-mini-tag {
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  opacity: 0.8;
+}
+.ai-mini-val {
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.ai-mini-val.buy { color: var(--ok); }
+.ai-mini-val.hold { color: var(--muted); }
+.ai-mini-val.trim { color: #fbbf24; }
+.ai-mini-val.sell { color: var(--err); }
+
+/* Per-source breakdown inside a detail card: each AI model and the street,
+   with the score it contributed and the weight it carried. */
+.ai-sources {
   list-style: none;
   margin: 0.35rem 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.6rem;
 }
-.ai-votes li {
+.ai-source {
   display: flex;
   align-items: center;
   gap: 0.45rem;
   flex-wrap: wrap;
   font-size: 0.78rem;
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--border);
 }
-.ai-votes .ai-vote-model {
+/* The street is the outside opinion — mark it apart from the models. */
+.ai-source.analyst { border-left-color: var(--accent); }
+.ai-source .ai-src-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.7rem;
   color: var(--muted);
 }
-.ai-votes .ai-horizon { color: var(--muted); font-size: 0.72rem; }
-.ai-votes .ai-line {
+.ai-source.analyst .ai-src-name {
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.ai-source .ai-src-weight {
+  font-size: 0.68rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.ai-source .ai-line {
   flex-basis: 100%;
   color: var(--muted);
   line-height: 1.45;
+  font-size: 0.75rem;
 }
+
+/* What Wall Street says — evidence the models weighed, not a score. Set apart
+   from the scoring sources above it so the distinction is visible at a glance. */
+.ai-street {
+  margin-top: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.05);
+}
+.ai-street p { margin: 0 0 0.2rem; }
+.ai-street-head {
+  font-size: 0.8rem !important;
+  font-weight: 600;
+  color: var(--text);
+}
+.ai-street-line {
+  font-size: 0.75rem !important;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.ai-street-note {
+  margin-top: 0.35rem !important;
+  font-size: 0.74rem !important;
+  color: var(--muted);
+  line-height: 1.5;
+  font-style: italic;
+}
+
+/* "evidence" chip next to the section label. */
+.ai-evidence-tag {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.02rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Who said what: the individual firms behind the street's view. */
+.ai-firms {
+  flex-basis: 100%;
+  list-style: none;
+  margin: 0.15rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.ai-firms li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.ai-firms .ai-firm-mark { width: 0.7rem; text-align: center; font-size: 0.6rem; }
+.ai-firms .ai-firm-mark.pos { color: var(--ok); }
+.ai-firms .ai-firm-mark.neg { color: var(--err); }
+.ai-firms .ai-firm { color: var(--text); }
+.ai-firms .ai-firm-grade { flex: 1; }
+.ai-firms .ai-firm-date { font-variant-numeric: tabular-nums; opacity: 0.75; }
 
 .ai-note {
   margin: 0.9rem 0 0;

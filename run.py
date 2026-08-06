@@ -53,6 +53,8 @@ from backend.ai_advisor import (
     LlamaClient,
     OllamaClient,
 )
+from backend.analyst_data import YahooAnalystProvider
+from backend.fundamentals_data import YahooFundamentalsProvider
 from backend.market_data import MarketDataProvider
 from backend.news_data import (
     CompositeNewsProvider,
@@ -72,6 +74,40 @@ from backend.workspace import WorkspaceManager, WorkspaceStorage
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 PORTFOLIOS_DIR = os.path.join(DATA_DIR, "portfolios")
+
+
+def _source_weights():
+    """Read the confidence-blend weights from AI_SOURCE_WEIGHTS, if set.
+
+    The advisor scores each holding 0-100 by averaging its AI models, which
+    count equally by default. Wall Street is not a weighted source — it is
+    evidence inside both prompts — so there is nothing to dial for it here; to
+    change how much it counts, that is now the models' judgement.
+
+    To lean on one model over another, key by its label::
+
+        AI_SOURCE_WEIGHTS="gemini:gemini-3.6-flash=2"   # double this one
+        AI_SOURCE_WEIGHTS="model=1,groq:llama-3.3-70b-versatile=0.5"
+
+    Keys are "model" (the default for every model) or a specific model label.
+    Returns None when unset, leaving the equal-weight defaults in place; a
+    malformed entry is skipped rather than crashing the app on boot.
+    """
+    raw = os.environ.get("AI_SOURCE_WEIGHTS", "").strip()
+    if not raw:
+        return None
+    weights = {}
+    for part in raw.split(","):
+        if "=" not in part:
+            continue
+        key, value = part.rsplit("=", 1)
+        try:
+            weights[key.strip()] = float(value)
+        except ValueError:
+            print(f"AI advisor: ignoring bad weight '{part.strip()}'.")
+    if weights:
+        print(f"AI advisor: source weights {weights}")
+    return weights or None
 
 
 def main():
@@ -96,16 +132,20 @@ def main():
     )
     # live market data (Yahoo Finance) — powers real prices, unrealized gains,
     # and earnings dates. Swap this provider to change data sources.
-    market = MarketService(MarketDataProvider(), portfolio)
+    market_data = MarketDataProvider()
+    market = MarketService(market_data, portfolio)
     # dashboard summary: total worth + realized + real unrealized gains.
     summary = SummaryService(portfolio, sales, market)
 
-    # AI advisor: a daily agent that turns the portfolio + news into buy/hold/
-    # sell suggestions for the week.
+    # AI advisor: a daily agent that turns the portfolio into a 0-100
+    # confidence score per holding for the next one to three months
+    # (100 = buy hard, 50 = hold, 0 = sell out).
     #
-    # Two models are asked the same question every refresh and their answers are
-    # merged into a consensus, so the UI can flag where they disagree. The whole
-    # job is a handful of ~1.5k-token calls a day, which every free tier absorbs.
+    # The score is the weighted average of the two AI models, and nothing else.
+    # Wall Street's research is fed to both models as evidence — they weigh it
+    # against the fundamentals and decide for themselves — rather than being
+    # averaged in as a third vote. The whole job is a handful of calls a day,
+    # which every free tier absorbs.
     #
     # AI_PROVIDER is a comma-separated priority list; the first one leads and
     # supplies the prose. Any provider without a key is skipped, so the default
@@ -181,9 +221,25 @@ def main():
         ]
     )
     print(f"News: {news.describe()}")
+
+    # What the big financial firms conclude — the consensus rating, the
+    # bull/bear split, how far apart the price targets are, and who upgraded or
+    # downgraded lately. This is fed to both models as evidence to weigh, not
+    # scored. No API key — it reuses the Yahoo session the market data holds.
+    analysts = YahooAnalystProvider(market_data)
+    print(f"Analysts: {analysts.describe()} (evidence for the models)")
+
+    # What those firms are looking at — valuation, margins, growth, leverage.
+    # Also prompt-side, so a model weighing a Strong Buy rating knows whether
+    # the stock trades at 12x earnings or 160x.
+    fundamentals = YahooFundamentalsProvider(market_data)
+    print(f"Fundamentals: {fundamentals.describe()}")
+
     advisor = AIAdvisorService(
         llms, news, market, portfolio, summary,
         storage=WorkspaceStorage(manager, "ai_suggestions.json"), refresh_hours=2,
+        analysts=analysts, source_weights=_source_weights(),
+        fundamentals=fundamentals, wishlist=wishlist,
     )
     # Refreshes every two hours during market hours (and once on boot).
     advisor.start_scheduler()

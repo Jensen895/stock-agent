@@ -46,20 +46,38 @@ everything goes through the API — so either side can be swapped independently.
   storage, it's swappable: implement the same methods against another data
   source and change one line in `run.py`. Every call degrades gracefully — if a
   quote can't be fetched the UI shows "—" rather than breaking.
+- **Analyst data layer** (`backend/analyst_data.py`) — `YahooAnalystProvider`,
+  an I/O boundary onto what the big financial firms **conclude**: the consensus
+  rating, the bull / hold / bear head count, the price-target spread, and the
+  recent calls of individual desks (Goldman Sachs, JP Morgan, Morgan Stanley,
+  …), plus the disagreement between them made explicit. **No API key** — it
+  reuses the Yahoo session the market layer already holds. This is *evidence
+  fed to both models*, not a scoring source — see
+  [Wall Street is an input, not a vote](#wall-street-is-an-input-not-a-vote).
+- **Fundamentals layer** (`backend/fundamentals_data.py`) —
+  `YahooFundamentalsProvider`, an I/O boundary onto what those firms are
+  **looking at**: trailing valuation multiples, margins and returns, growth,
+  cash and debt, beta, the 52-week range, short interest, and the actual EPS
+  printed over the last four quarters. This one *does* go into the models'
+  prompt, so a model weighing a Strong Buy rating knows whether the stock
+  trades at 12x earnings or 160x. An **allowlist** of 35 named fields decides
+  what crosses over, keeping the prompt focused and its token cost
+  predictable.
 - **AI advisor layer** (`backend/ai_advisor.py`, `backend/news_data.py`) — a
-  daily agent that composes the portfolio + market data with recent news and
-  asks an LLM for weekly buy/hold/sell suggestions. The LLM is pluggable via
-  `AI_PROVIDER`: `GeminiClient` (Google's free API, the default),
+  daily agent that composes the portfolio + market data with recent news, asks
+  the LLMs for a one-to-three-month view, and blends their answers with the analyst
+  consensus into **one 0-100 confidence score per holding**. The LLM is
+  pluggable via `AI_PROVIDER`: `GeminiClient` (Google's free API, the default),
   `GroqClient` (Groq's free API), `LlamaClient` (Meta's internal Llama API),
   `OllamaClient` (a local model — no key, nothing leaves the machine), or
   `ClaudeClient` (the public Claude API). `AI_PROVIDER` takes a *list*, and
-  **two models are asked every refresh** so their answers can be cross-checked;
-  each suggestion is tagged `agree` / `split` / `single` and the UI flags
-  disagreement. News comes from `CompositeNewsProvider` — Yahoo Finance first,
-  Google News RSS as a fallback, **neither needing an API key**. Every client
-  and provider is an I/O boundary (stdlib `urllib` only, like the market
-  layer); `AIAdvisorService` holds the logic and the every-2h refresh. Served
-  over `/api/ai`; degrades gracefully when a model or key isn't available.
+  **two models are asked every refresh** and the score is the average of their
+  two answers. News comes from
+  `CompositeNewsProvider` — Yahoo Finance first, Google News RSS as a fallback,
+  **neither needing an API key**. Every client and provider is an I/O boundary
+  (stdlib `urllib` only, like the market layer); `AIAdvisorService` holds the
+  logic and the every-2h refresh. Served over `/api/ai`; degrades gracefully
+  when a model, key, or source isn't available.
 
 ### Why it's flexible / reusable
 
@@ -195,22 +213,117 @@ its next upcoming earnings report date, fetched from the market data provider.
 
 ### AI Advisor
 
-A daily AI agent that turns your portfolio into concrete buy / hold / sell calls
-for the week ahead. It sits in its own column on the right of everything else.
+A daily AI agent that turns your portfolio into a **confidence score** per
+holding for the next one to three months. It sits in its own column on the right of everything
+else.
 
 | Method | Path             | Purpose                                          | Body |
 | ------ | ---------------- | ------------------------------------------------ | ---- |
 | GET    | `/api/ai`        | Latest suggestions (cached) + status             | —    |
 | POST   | `/api/ai/refresh`| Trigger a background regeneration                 | —    |
 
-**What it reads** — everything the app already computes, plus news:
+#### The confidence score
+
+Every holding gets **one number from 0 to 100**, and the number *is* the call:
+
+```
+  0 ──────────── 25 ──────────── 50 ──────────── 75 ──────────── 100
+ sell it all    trim it        HOLD            buy more      buy hard
+```
+
+A score in the **mid-40s to mid-50s means hold**; the further it sits from 50,
+the stronger the buy (above) or sell (below) signal. The panel shows the number,
+the band it falls in ("Strong buy", "Lean trim", …), and a meter marking how far
+from neutral it is.
+
+That score is the **weighted average of the two AI models, and nothing else**.
+
+| # | Source     | Where it comes from                                     |
+| - | ---------- | -------------------------------------------------------- |
+| 1 | AI model A | first entry in `AI_PROVIDER`, scores each holding 0-100    |
+| 2 | AI model B | second entry, asked the same question independently        |
+
+**Weights** are equal by default. To lean on one model, set `AI_SOURCE_WEIGHTS`
+keyed by its label:
+
+```bash
+AI_SOURCE_WEIGHTS="gemini:gemini-3.6-flash=2"   # double this one
+```
+
+A model that doesn't answer for a ticker drops out and the remaining weight is
+**renormalised**, so a lone survivor's score passes through unchanged rather
+than being dragged toward neutral by the gap.
+
+#### Wall Street is an input, not a vote
+
+The sell-side research — Goldman Sachs, JP Morgan, Morgan Stanley and the rest
+— goes **into both models' prompts** as evidence. Each model weighs it against
+the fundamentals, the momentum and the news, then reaches its own number. The
+firms never score anything directly.
+
+|                                                              | Read by the models | Scores anything |
+| ------------------------------------------------------------ | :----------------: | :-------------: |
+| Consensus rating and 1-5 mean, bull/hold/bear head count       | ✅ | ❌ |
+| Price targets: mean, high, low, and what each implies from here | ✅ | ❌ |
+| Which firms upgraded, downgraded, initiated or reiterated       | ✅ | ❌ |
+| Fundamentals, momentum, gain history, news                      | ✅ | ❌ |
+| **The two AI models' own 0-100 conviction**                     | —  | ✅ |
+
+**Why it changed.** An earlier version averaged the street in as a third,
+independent source. Mechanical averaging turned out to be the wrong tool.
+Measured across a real 23-holding portfolio, the consensus mean only ever ranged
+**1.3 to 3.5 of a nominal 1-5 scale**, and **22 of 23 stocks scored above 50** —
+the desks essentially never publish a bearish rating. Any fixed mapping onto a
+0-100 conviction scale is therefore mis-centred by construction, and the blend
+inherited a systematic upward bias that no choice of weights really fixed. (The
+horizon was the other suspect and it was not the cause: matching the models'
+timescale to the street's twelve-month view moved the gap by less than a point.)
+
+A model can do what an average cannot — notice the skew and discount it. So the
+prompt states plainly that sell-side ratings are structurally bullish, that a
+"Buy" is closer to their neutral than to real enthusiasm, and that a fresh
+downgrade tells you more than a standing rating. Each model must say in its
+reasoning what it made of the street's view and whether it sided with it.
+
+**Surfacing the contradictions.** A consensus label hides the interesting part.
+"Buy, 2.07/5" can mean forty desks quietly agreeing or a genuine fight, and the
+second is a far weaker signal. So the models also get the disagreement spelled
+out — the bull/bear split, how wide the price targets are spread relative to
+their mean, what the extremes imply from today's price, how many firms upgraded
+versus downgraded — plus a one-line `disagreement_note`:
+
+> 41 of 51 ratings are buy with none saying sell and 10 on hold; price targets
+> run $320 to $1,250 (161% of the mean target), implying anything from −34% to
+> +159% from here
+
+It works. Every call now engages with the street explicitly — for example
+*"While Wall Street rates AMD a Strong Buy with a mean target of $579.11, the
+vast spread ($320 to $1,250) indicates high uncertainty"*, against a model that
+agreed elsewhere: *"We align with this view as Broadcom boasts phenomenal
+fundamentals: 48.98% operating margins, 37.28% ROE."*
+
+**The trade-off, stated plainly.** The two remaining sources are no longer
+independent of each other, since both read the same street view. When they
+agree, that is weaker evidence than it was when one of the three opinions was
+formed without seeing the others. What is gained is that the street's view is
+now *reasoned about* rather than averaged in.
+
+**What it reads** — everything the app already computes, plus fundamentals,
+analyst research and news:
 
 - all your holdings, share counts, average cost, and cost basis,
 - the current market price and today's move (momentum),
 - the full unrealized-gain history (1D / 1W / 1M / YTD / 1Y / Total),
 - realized gains from the sales log,
-- recent news headlines per ticker (Yahoo Finance, falling back to Google News
-  RSS — no API key needed for either).
+- **company fundamentals per ticker** — trailing and forward P/E, PEG, P/S, P/B
+  and EV/EBITDA, gross / operating / net margins, ROE and ROA, year-over-year
+  revenue and earnings growth, cash, debt, debt/equity, current ratio, free and
+  operating cash flow, beta, the 52-week range, 50- and 200-day averages, short
+  interest, institutional ownership, and the last four quarters of actual EPS
+  with how far each beat or missed,
+- **the Wall Street research** described above,
+- recent news headlines per ticker over the last 30 days (Yahoo Finance, falling
+  back to Google News RSS — no API key needed for either).
 
 **Why the news matters.** The models are never asked to search; they are handed
 headlines. Two reasons. Free-tier Gemini *cannot* use Google Search grounding —
@@ -220,34 +333,53 @@ asked about "recent news" with none supplied does not say "I don't know": it
 invents specific, confident, wrong headlines. Real headlines are what keep the
 suggestions honest.
 
-**What it suggests** — for each holding: **buy more**, **hold**, **sell part**,
-or **sell all**, with a horizon of **at most a week**, a concrete price trigger
-where relevant (e.g. "if it drops below $320 this week, sell before it does"),
-and the reasoning behind the call.
+**What it suggests** — for each holding: the confidence score and the band it
+implies (**buy more**, **hold**, **sell part**, **sell all**), with a horizon of
+**one to three months**, a concrete price trigger where relevant (e.g. "add
+below $280; if it closes under $240 the thesis is broken, sell"), and the
+reasoning behind the call.
 
 **Risk toggle** — every refresh generates two sets, one **low-risk** and one
 **high-risk**; the toggle switches between them instantly with no new API call.
 Low risk prioritises protecting capital; high risk prioritises upside.
 
-**Consensus** — two models are asked the same question every refresh and their
-answers are merged per ticker. Where they pick the same action the call is
-marked **Both agree**; where they differ it is marked **Split** and the detail
-card shows what each model said. The first model in `AI_PROVIDER` leads and
-supplies the prose. This is affordable because the job is tiny — two risk
-profiles times two models, a few times a day, at roughly 1.5k input tokens a
-call — and all four calls run concurrently, so a refresh takes about 20s rather
-than the sum of its parts. If only one model is configured, suggestions are
-marked `single` and nothing else changes.
+**Agreement** — each row shows the three source scores next to the average, so
+you can see the spread yourself rather than read a badge about it. The backend
+still grades it for the aggregate status line, measured as the **spread**
+between scores rather than by comparing labels: within 15 points is `agree`,
+more than 35 apart is `split`, anything between is `mixed`. Comparing labels
+instead flagged nearly every holding as split, since the street rarely publishes
+anything below "buy". The first model in `AI_PROVIDER` leads and supplies the
+prose. This is affordable because the job is tiny — two risk profiles times two
+models, a few times a day, at roughly 1.5k input tokens a call — and every call
+(analyst ratings included) runs concurrently, so a refresh takes about 40s
+rather than the sum of its parts. With one model configured, calls are marked
+`single` and nothing else changes.
+
+**Two guardrails on the model output**, both earning their keep on real runs:
+
+- *Scale inversion.* Models sometimes read "confidence" as certainty in their
+  own recommendation, returning `100` next to `"sell"` — the exact inverse of
+  what the number means here. One flipped vote moves a blended score by ~30
+  points, so the action enum bounds the score: a score outside its action's
+  range is pulled to the nearest edge, and the correction is logged.
+- *Invented tickers.* A model answering for `HIMSS` when you hold `HIMS` would
+  add a phantom position to the panel, so rows are anchored to your actual
+  holdings and unknown symbols are dropped.
 
 **The UI**
 
-- A **summary** at the very top: one bullet per stock — ticker, the call, the
-  consensus badge, and in how many days — plus a one-line rationale and an
-  overall portfolio note. The status line reads e.g. "2 models · 2/3 agreed ·
-  1 split".
+- A **summary** at the very top: one bullet per stock — ticker, the blended
+  score, the band it falls in, then **the three numbers behind it** in smaller
+  type (`AI 30 · AI 20 · WS 88`), and over how many months — plus a meter, a
+  one-line rationale, and an overall portfolio note. The three always appear in
+  the same order (model A, model B, Wall Street), so the last one is always the
+  street; a source with no score for that ticker shows an em dash, and hovering
+  any number names its source. The status line reads e.g. "3 sources (2 AI +
+  Wall Street) — 9/23 agreed · 8 split — avg score 65".
 - A **See details** button switches to a details tab: the ~10-line reasoning for
-  each stock, its price trigger, its main risk, and the per-model breakdown.
-  **Back to summary** returns.
+  each stock, its price trigger, its main risk, and the full per-source
+  breakdown including the individual firms. **Back to summary** returns.
 
 **Refresh** — regenerates automatically **every two hours during US market
 hours** (and once on startup), and you can force a refresh with the button. The
@@ -262,6 +394,11 @@ instantly and survives restarts.
   "models": ["gemini:gemini-3.6-flash", "groq:llama-3.3-70b-versatile"],
   "news_configured": true,     // the keyless sources make this true by default
   "news_sources": "Yahoo → GoogleNewsRSS",
+  "analysts_configured": true, // Wall Street: evidence in both prompts (keyless)
+  "analyst_source": "Yahoo Finance analyst ratings",
+  "fundamentals_configured": true,  // also prompt-side, not a scoring source
+  "fundamentals_source": "Yahoo Finance fundamentals",
+  "source_weights": { "model": 1.0 },   // only the AI models carry weights
   "refreshing": false,         // true while a regeneration is in flight
   "market_open": true,
   "refresh_hours": 2,
@@ -271,14 +408,44 @@ instantly and survives restarts.
     "low": {
       "portfolio_note": "…",
       "models": ["gemini:gemini-3.6-flash", "groq:llama-3.3-70b-versatile"],
-      "agreement": { "agreed": 2, "split": 1, "total": 3 },
+      "avg_confidence": 61.4,
+      "agreement": { "agreed": 2, "mixed": 1, "split": 1, "total": 4 },
       "suggestions": [
         {
-          "ticker": "AAPL", "action": "trim", "horizon_days": 5,
+          "ticker": "AAPL",
+          "confidence": 71.1,              // the blend — 0-100, 50 = hold
+          "action": "buy",                 // the band it falls in
+          "confidence_label": "Buy",
+          "horizon_months": 2,
           "headline": "…", "reasoning": "…", "price_trigger": "…", "risks": "…",
-          "consensus": "agree",          // agree | split | single
-          "votes": [ { "model": "…", "action": "trim", "horizon_days": 5,
-                       "headline": "…" } ]
+          "consensus": "agree",            // agree | mixed | split | single
+          "sources": [
+            { "kind": "model", "name": "gemini:gemini-3.6-flash",
+              "confidence": 80.0, "action": "buy", "label": "Strong buy",
+              "weight": 1.0, "detail": "…" },
+            { "kind": "model", "name": "groq:llama-3.3-70b-versatile",
+              "confidence": 60.0, "action": "buy", "label": "Lean buy",
+              "weight": 1.0, "detail": "…" },
+          ],
+          // The research BOTH models read before scoring. Carries no score and
+          // takes no part in the average — it is kept so the UI can show the
+          // evidence they reasoned from.
+          "wall_street": {
+            "rating": "Buy", "mean": 2.07, "analyst_count": 41,
+            "distribution": { "strongBuy": 6, "buy": 22, "hold": 13,
+                              "sell": 2, "strongSell": 3 },
+            "bulls": 28, "neutral": 13, "bears": 5,
+            "target": { "mean": 324.01, "high": 400.0, "low": 215.0,
+                        "upside_pct": 4.18, "spread_pct": 57.1,
+                        "low_implies_pct": -30.9, "high_implies_pct": 28.6 },
+            "recent_upgrades": 2, "recent_downgrades": 1,
+            "firms": [ { "firm": "JP Morgan", "grade": "Overweight",
+                         "action": "main", "action_label": "reiterated",
+                         "from_grade": "Overweight", "date": "2026-07-31",
+                         "price_target": 340.0 } ],
+            "disagreement_note": "28 of 46 ratings are buy while 5 say sell …",
+            "summary": "41 analysts · Buy (2.07/5) · target $324.01 (+4.18%)"
+          }
         }
       ]
     },
@@ -288,9 +455,13 @@ instantly and survives restarts.
 }
 ```
 
-Each suggestion is `{ticker, action, horizon_days, headline, reasoning,
-price_trigger, risks}` where `action` ∈ `buy | hold | trim | sell` and
-`horizon_days` is 1–7.
+Each suggestion is `{ticker, confidence, action, confidence_label,
+horizon_months, headline, reasoning, price_trigger, risks, consensus, sources,
+wall_street}` where `confidence` is 0–100, `action` ∈ `buy | hold | trim | sell`
+(derived from the score), and `horizon_months` is 1–3. `sources` holds only the
+AI models; `wall_street` is unscored evidence. Suggestions saved before the switch to
+a quarterly view carry `horizon_days` instead; both backend and UI still read
+them.
 
 > **Not financial advice.** Suggestions are generated by a model and can be
 > wrong — verify before you trade.
@@ -317,6 +488,17 @@ AI_PROVIDER=gemini,groq,gemini-b     # the default
 With only a Gemini key that resolves to `gemini` + `gemini-b` — two *different*
 Gemini models cross-checking each other. Add `GROQ_API_KEY` and Groq slots in
 as the second opinion automatically, giving you two independent vendors.
+
+The **third** confidence source — the big financial firms' analyst consensus —
+needs no key or configuration at all; it comes from the same Yahoo session the
+price data already uses. To change how much each source counts toward the
+blended score, set `AI_SOURCE_WEIGHTS` (equal by default). Only the AI models
+carry weights — Wall Street is evidence inside their prompts, so how much it
+counts is now the models' judgement rather than a dial:
+
+```bash
+AI_SOURCE_WEIGHTS="gemini:gemini-3.6-flash=2"    # lean on one model
+```
 
 Sizing note: this app makes roughly **8 model calls and ~15k tokens a day**.
 Every free tier below clears that by orders of magnitude, so choose on accuracy,

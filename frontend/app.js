@@ -667,7 +667,9 @@ const DEFAULT_RISK = "low";
 let aiData = null;
 let aiPollTimer = null; // fast poll while a refresh is in flight
 
-// Map the model's action to a display label + color class.
+// Map an action to a display label + color class. The backend derives the
+// action from the blended confidence score, so these are the score's colours
+// too: buy green, hold grey, trim amber, sell red.
 const AI_ACTIONS = {
   buy: { label: "Buy more", cls: "buy" },
   hold: { label: "Hold", cls: "hold" },
@@ -747,16 +749,26 @@ function setAiStatus() {
   } else if (!aiData.risk_profiles) {
     aiStatusEl.textContent = "No suggestions yet — hit Refresh to generate them.";
   } else {
-    // Two models cross-check each other; say how much they agreed, and warn if
-    // one of them dropped out so a lone opinion isn't mistaken for a consensus.
+    // The models cross-check each other; say how many scored, how often they
+    // agreed, and note that Wall Street fed into their reasoning rather than
+    // being averaged in — so nobody reads the score as including a third vote.
     const profile = aiData.risk_profiles[getRisk()];
     const bits = [];
-    const ag = profile && profile.agreement;
-    if (ag && ag.total && (profile.models || []).length > 1) {
+    const modelCount = (profile && profile.models ? profile.models : []).length;
+    if (modelCount > 1) {
       bits.push(
-        `${profile.models.length} models · ${ag.agreed}/${ag.total} agreed` +
-          (ag.split ? ` · ${ag.split} split` : ""),
+        `${modelCount} AI models` +
+          (aiData.analysts_configured ? " weighing Wall Street" : ""),
       );
+    }
+    const ag = profile && profile.agreement;
+    if (ag && ag.total && modelCount > 1) {
+      bits.push(
+        `${ag.agreed}/${ag.total} agreed` + (ag.split ? ` · ${ag.split} split` : ""),
+      );
+    }
+    if (profile && profile.avg_confidence != null) {
+      bits.push(`avg score ${Math.round(profile.avg_confidence)}`);
     }
     if (aiData.model_errors && aiData.model_errors.length) {
       bits.push(`${aiData.model_errors.length} model call(s) failed`);
@@ -767,7 +779,99 @@ function setAiStatus() {
   aiRefreshBtn.disabled = !aiData.configured || aiData.refreshing;
 }
 
-// Summary: bullet per stock — ticker, action badge, horizon, one-line headline.
+// --- Confidence score display ------------------------------------------
+//
+// Each holding carries one 0-100 score blended from three sources (the two AI
+// models and the Wall Street analyst consensus). 100 = strong buy, 50 = hold,
+// 0 = strong sell, so the number IS the call and the action badge just names
+// the band it falls in.
+
+// The score of a suggestion, or null for suggestions saved before scoring
+// existed (the panel still renders those from their action alone).
+function scoreOf(s) {
+  return typeof s.confidence === "number" ? s.confidence : null;
+}
+
+// The score as a pill, coloured by its band.
+function scorePill(s, extraClass = "") {
+  const score = scoreOf(s);
+  if (score == null) return "";
+  const cls = (AI_ACTIONS[s.action] || AI_ACTIONS.hold).cls;
+  const label = s.confidence_label || "";
+  return `<span class="ai-score ${cls}${extraClass ? " " + extraClass : ""}"
+    title="Confidence ${Math.round(score)}/100${label ? ` — ${escapeHtml(label)}` : ""}
+ (100 = buy hard, 50 = hold, 0 = sell out)">${Math.round(score)}</span>`;
+}
+
+// A 0-100 track with a tick at the neutral midpoint and a marker at the score,
+// so the distance from "hold" is visible at a glance.
+function scoreMeter(score, action) {
+  if (score == null) return "";
+  const cls = (AI_ACTIONS[action] || AI_ACTIONS.hold).cls;
+  const pos = Math.max(0, Math.min(100, score));
+  return `<div class="ai-meter" role="img"
+    aria-label="Confidence ${Math.round(score)} out of 100">
+    <span class="ai-meter-mid"></span>
+    <span class="ai-meter-dot ${cls}" style="left:${pos}%"></span>
+  </div>`;
+}
+
+// The band name ("Strong buy", "Hold", "Lean trim", ...) when the backend
+// supplied one, else the plain action label.
+function bandLabel(s) {
+  const a = AI_ACTIONS[s.action] || AI_ACTIONS.hold;
+  return { cls: a.cls, text: s.confidence_label || a.label };
+}
+
+// The numbers behind the average — one per AI model, rendered smaller than the
+// blended score they average out to. Slots are keyed to the profile's model
+// list rather than to the order sources happen to arrive in, so each position
+// always means the same model; a model with no score for this ticker shows an
+// em dash rather than shifting the others along.
+//
+// Wall Street is deliberately absent here: it no longer scores anything. Both
+// models read the street's research as evidence and it is folded into their
+// own numbers, so a separate WS figure would imply a vote that isn't cast.
+// The detail card shows what they were shown, under "What Wall Street says".
+function miniScores(s, modelLabels) {
+  const sources = s.sources || [];
+  if (!sources.length) return "";
+
+  const slots = (modelLabels || []).map((label) => ({
+    tag: "AI",
+    name: label,
+    src: sources.find((v) => v.kind === "model" && v.name === label) || null,
+  }));
+  // Any model that answered but isn't in the profile list — never expected,
+  // but better shown than silently dropped.
+  sources
+    .filter((v) => v.kind === "model" && !(modelLabels || []).includes(v.name))
+    .forEach((v) => slots.push({ tag: "AI", name: v.name, src: v }));
+  if (!slots.length) return "";
+
+  const cells = slots
+    .map((slot) => {
+      if (!slot.src) {
+        return `<span class="ai-mini" title="${escapeHtml(
+          slot.name
+        )} — no score">
+          <span class="ai-mini-tag">${slot.tag}</span>
+          <span class="ai-mini-val">—</span></span>`;
+      }
+      const cls = (AI_ACTIONS[slot.src.action] || AI_ACTIONS.hold).cls;
+      return `<span class="ai-mini" title="${escapeHtml(slot.src.name)} — ${
+        Math.round(slot.src.confidence)
+      }/100${slot.src.label ? ` (${escapeHtml(slot.src.label)})` : ""}">
+        <span class="ai-mini-tag">${slot.tag}</span>
+        <span class="ai-mini-val ${cls}">${Math.round(slot.src.confidence)}</span>
+      </span>`;
+    })
+    .join("");
+  return `<span class="ai-minis">${cells}</span>`;
+}
+
+// Summary: bullet per stock — ticker, the blended score, the band it falls in,
+// the three source scores behind it, horizon, meter.
 function renderAiSummary(profile) {
   const suggestions = (profile && profile.suggestions) || [];
   if (!suggestions.length) {
@@ -776,14 +880,17 @@ function renderAiSummary(profile) {
     aiSeeDetailsBtn.hidden = true;
     return;
   }
+  const models = (profile && profile.models) || [];
   aiSummaryList.innerHTML = suggestions
     .map((s) => {
-      const a = AI_ACTIONS[s.action] || AI_ACTIONS.hold;
+      const band = bandLabel(s);
       return `<li>
         <span class="ai-ticker">${escapeHtml(s.ticker)}</span>
-        <span class="ai-action ${a.cls}">${a.label}</span>
-        ${consensusChip(s)}
-        <span class="ai-horizon">${fmtHorizon(s.horizon_days)}</span>
+        ${scorePill(s)}
+        <span class="ai-action ${band.cls}">${escapeHtml(band.text)}</span>
+        ${miniScores(s, models)}
+        <span class="ai-horizon">${fmtHorizon(s)}</span>
+        ${scoreMeter(scoreOf(s), s.action)}
         ${s.headline ? `<span class="ai-line">${escapeHtml(s.headline)}</span>` : ""}
       </li>`;
     })
@@ -792,39 +899,112 @@ function renderAiSummary(profile) {
   aiSeeDetailsBtn.hidden = false;
 }
 
-// A small badge showing whether the models agreed on this call. Only shown when
-// there were actually two opinions to compare.
-function consensusChip(s) {
-  if (s.consensus === "agree") {
-    return `<span class="ai-consensus agree" title="Both models chose this action">Both agree</span>`;
-  }
-  if (s.consensus === "split") {
-    const other = (s.votes || []).find((v) => v.action !== s.action);
-    const alt = other ? (AI_ACTIONS[other.action] || AI_ACTIONS.hold).label : "";
-    return `<span class="ai-consensus split" title="The models disagreed — see details">Split${
-      alt ? ` · other says ${escapeHtml(alt)}` : ""
-    }</span>`;
-  }
-  return "";
-}
-
-// Per-model breakdown, shown on the detail card when opinions were collected.
-function votesBlock(s) {
-  const votes = s.votes || [];
-  if (votes.length < 2) return "";
-  const rows = votes
-    .map((v) => {
-      const a = AI_ACTIONS[v.action] || AI_ACTIONS.hold;
+// The firms behind an analyst score — who upgraded, downgraded, or reiterated.
+function firmsBlock(source) {
+  const firms = source.firms || [];
+  if (!firms.length) return "";
+  const arrows = { up: "▲", down: "▼", init: "＋", main: "=", reit: "=" };
+  const rows = firms
+    .map((f) => {
+      const arrow = arrows[f.action] || "·";
+      const cls =
+        f.action === "up" ? "pos" : f.action === "down" ? "neg" : "";
+      const target = f.price_target ? ` · $${fmt(f.price_target)}` : "";
       return `<li>
-        <span class="ai-vote-model">${escapeHtml(v.model)}</span>
-        <span class="ai-action ${a.cls}">${a.label}</span>
-        <span class="ai-horizon">${fmtHorizon(v.horizon_days)}</span>
-        ${v.headline ? `<span class="ai-line">${escapeHtml(v.headline)}</span>` : ""}
+        <span class="ai-firm-mark ${cls}">${arrow}</span>
+        <span class="ai-firm">${escapeHtml(f.firm)}</span>
+        <span class="ai-firm-grade">${escapeHtml(f.grade)}${target}</span>
+        <span class="ai-firm-date">${escapeHtml(f.date || "")}</span>
       </li>`;
     })
     .join("");
-  return `<span class="ai-field-label">What each model said</span>
-          <ul class="ai-votes">${rows}</ul>`;
+  return `<ul class="ai-firms">${rows}</ul>`;
+}
+
+// The breakdown behind the blended score: each AI model, its own score, and how
+// much weight it carried. Models only — the street doesn't score.
+function sourcesBlock(s) {
+  const sources = (s.sources || []).filter((v) => v.kind !== "analyst");
+  if (!sources.length) return "";
+  const rows = sources
+    .map((v) => {
+      const cls = (AI_ACTIONS[v.action] || AI_ACTIONS.hold).cls;
+      return `<li class="ai-source model">
+        <span class="ai-src-name">${escapeHtml(v.name)}</span>
+        <span class="ai-score sm ${cls}">${Math.round(v.confidence)}</span>
+        <span class="ai-src-weight" title="Weight in the blended score">×${fmtWeight(
+          v.weight
+        )}</span>
+        ${scoreMeter(v.confidence, v.action)}
+        ${v.detail ? `<span class="ai-line">${escapeHtml(v.detail)}</span>` : ""}
+      </li>`;
+    })
+    .join("");
+  const score = scoreOf(s);
+  const heading =
+    score == null
+      ? "Sources"
+      : `Confidence ${Math.round(score)}/100 · ${sources.length} AI model${
+          sources.length === 1 ? "" : "s"
+        }`;
+  return `<span class="ai-field-label">${escapeHtml(heading)}</span>
+          <ul class="ai-sources">${rows}</ul>`;
+}
+
+// What Wall Street says — shown as evidence, not as a vote. This is the same
+// research both models read before scoring, so it explains where their numbers
+// came from without pretending to be a number of its own. Falls back to the
+// legacy analyst *source* on suggestions saved when the street was still
+// scored, so old data still renders.
+function streetBlock(s) {
+  const w =
+    s.wall_street ||
+    (s.sources || []).find((v) => v.kind === "analyst") ||
+    null;
+  if (!w) return "";
+
+  // Bull / hold / bear head count as a single readable line.
+  const counts = [];
+  if (w.bulls != null) counts.push(`${w.bulls} buy`);
+  if (w.neutral != null) counts.push(`${w.neutral} hold`);
+  if (w.bears != null) counts.push(`${w.bears} sell`);
+
+  const t = w.target || {};
+  const spread =
+    t.low && t.high
+      ? `<p class="ai-street-line">Targets $${fmt(t.low)} – $${fmt(t.high)}${
+          t.mean ? ` (mean $${fmt(t.mean)}` : ""
+        }${
+          t.upside_pct != null
+            ? `, ${t.upside_pct > 0 ? "+" : ""}${fmt(t.upside_pct)}% from here)`
+            : t.mean
+            ? ")"
+            : ""
+        }</p>`
+      : "";
+
+  const head = [
+    w.rating ? escapeHtml(w.rating) : "",
+    w.mean != null ? `${w.mean}/5` : "",
+    w.analyst_count ? `${w.analyst_count} analysts` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return `<span class="ai-field-label">What Wall Street says
+    <span class="ai-evidence-tag" title="Both models read this before scoring —
+ it is evidence they weighed, not a score of its own">evidence</span></span>
+    <div class="ai-street">
+      ${head ? `<p class="ai-street-head">${head}</p>` : ""}
+      ${counts.length ? `<p class="ai-street-line">${counts.join(" · ")}</p>` : ""}
+      ${spread}
+      ${
+        w.disagreement_note
+          ? `<p class="ai-street-note">${escapeHtml(w.disagreement_note)}</p>`
+          : ""
+      }
+      ${firmsBlock(w)}
+    </div>`;
 }
 
 // Details: one card per stock with the ~10-line reasoning, trigger, and risks.
@@ -836,7 +1016,7 @@ function renderAiDetails(profile) {
   }
   aiDetailsList.innerHTML = suggestions
     .map((s) => {
-      const a = AI_ACTIONS[s.action] || AI_ACTIONS.hold;
+      const band = bandLabel(s);
       const trigger = s.price_trigger
         ? `<span class="ai-field-label">Price trigger</span>
            <p class="ai-trigger">${escapeHtml(s.price_trigger)}</p>`
@@ -848,25 +1028,38 @@ function renderAiDetails(profile) {
       return `<div class="ai-detail">
         <div class="ai-detail-head">
           <span class="ai-ticker">${escapeHtml(s.ticker)}</span>
-          <span class="ai-action ${a.cls}">${a.label}</span>
-          ${consensusChip(s)}
-          <span class="ai-horizon">${fmtHorizon(s.horizon_days)}</span>
+          ${scorePill(s, "lg")}
+          <span class="ai-action ${band.cls}">${escapeHtml(band.text)}</span>
+          <span class="ai-horizon">${fmtHorizon(s)}</span>
         </div>
+        ${scoreMeter(scoreOf(s), s.action)}
         <p class="ai-reason">${escapeHtml(s.reasoning)}</p>
         ${trigger}
         ${risks}
-        ${votesBlock(s)}
+        ${sourcesBlock(s)}
+        ${streetBlock(s)}
       </div>`;
     })
     .join("");
 }
 
-// "in how many days" — capped at a week by the backend.
-function fmtHorizon(days) {
-  const d = Number(days) || 1;
-  if (d >= 7) return "within a week";
-  if (d === 1) return "within 1 day";
-  return `within ${d} days`;
+// Weights are usually whole numbers ("×1"); show a decimal only when there is one.
+function fmtWeight(w) {
+  const n = Number(w);
+  if (!isFinite(n)) return "1";
+  return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, "");
+}
+
+// "over what period" — the backend caps this at a quarter. Falls back to the
+// legacy horizon_days field so suggestions saved before the switch to a one-to
+// -three-month view still read sensibly.
+function fmtHorizon(s) {
+  let months = s && s.horizon_months;
+  if (months == null && s && s.horizon_days != null) {
+    months = Math.round(Number(s.horizon_days) / 30) || 1;
+  }
+  const m = Math.max(1, Math.min(3, Math.round(Number(months) || 1)));
+  return m === 1 ? "over 1 month" : `over ${m} months`;
 }
 
 // A compact "updated" stamp: date + time, local.
