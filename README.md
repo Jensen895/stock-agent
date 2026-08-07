@@ -205,8 +205,9 @@ records no sale.
 **Wishlist** — a separate table of tickers you don't own yet but plan to buy
 (only the ticker is stored — no shares or price). In the UI it's shown as a full
 table with today's open, the live price, the change vs. the open, and the next
-earnings date. Kept apart from holdings so it can later feed the AI's buy
-suggestions.
+earnings date. Kept apart from holdings because it asks a different question —
+"get in?" rather than "stay in?" — which is exactly how the AI advisor scores it
+(see [Wishlist buys](#wishlist-buys)).
 
 **Earnings dates** — every stock in both the holdings and wishlist tables shows
 its next upcoming earnings report date, fetched from the market data provider.
@@ -377,9 +378,62 @@ rather than the sum of its parts. With one model configured, calls are marked
   street; a source with no score for that ticker shows an em dash, and hovering
   any number names its source. The status line reads e.g. "3 sources (2 AI +
   Wall Street) — 9/23 agreed · 8 split — avg score 65".
-- A **See details** button switches to a details tab: the ~10-line reasoning for
-  each stock, its price trigger, its main risk, and the full per-source
-  breakdown including the individual firms. **Back to summary** returns.
+- Every row carries its own **Details →** button, which switches to a details
+  tab showing *that stock only*: the ~10-line reasoning, its price trigger, its
+  main risk, and the full per-source breakdown including the individual firms.
+  With two dozen holdings a single button at the bottom of the list meant
+  scrolling past everything to open anything, so the affordance lives on each
+  row instead. **Back to summary** returns and clears the filter.
+
+<a id="wishlist-buys"></a>
+**Wishlist buys** — under the holdings calls sits a second, deliberately
+minimal section: the AI's read on whether now is a good time to *enter* the
+stocks on your wishlist.
+
+- Every wishlist ticker is scored on each refresh, with the same data the
+  holdings get (live price, fundamentals, news, Wall Street) but a separate
+  prompt and system prompt — the question is entry timing, not whether to keep
+  holding. `confidence` reads as 100 = buy now, 50 = wait, 0 = avoid.
+- **Only genuine buys are shown.** A name survives to the UI only if the blended
+  call is `buy` *and* scores at least `_WISHLIST_MIN_CONFIDENCE` (55). Everything
+  in the wait band is dropped server-side, and when nothing clears the bar the
+  section is hidden outright — it doesn't render as an empty box or a wall of
+  "not yet". Survivors are sorted by conviction, highest first.
+- The panel's wishlist counters (`avg_confidence`, `agreement`) describe the
+  kept buys, not the whole watchlist — an average over names nobody suggested
+  buying would be noise.
+- Each surviving row shows its entry trigger inline and has its own
+  **Details →**, which opens the same detail card under a *Wishlist details*
+  heading with a `wishlist` badge.
+
+**Cost of the extra calls — watch your daily quota.** Because holdings and
+wishlist are asked separately, a refresh fans out `risk profiles × models × 2`
+calls instead of `× 1` — 8 on the default two-model setup, every two hours
+during market hours. Against a free tier that grants a *daily* allowance per
+model (`gemini-3.6-flash` gets 20 requests/day), that budget is gone in about
+two refreshes, and for the rest of the day that model 429s on every call.
+
+The panel keeps working — one model failing still produces suggestions — but the
+scores stop being a consensus and become one model's opinion, which is easy to
+miss. So:
+
+- The status line says it outright, in amber: *"only 1 of 2 models answered — no
+  consensus, scores are a single model's view"*.
+- A daily-quota 429 is **not** retried. The provider still suggests a retry
+  delay for one (Gemini says 9s), but a daily allowance doesn't return before it
+  resets, so retrying only holds a worker open and stalls the refresh. The quota
+  id from the error's `details` is appended to the message so
+  `_is_transient()` can tell a daily cap from a per-minute burst.
+- A per-minute 429 *is* retried, and now waits the delay the provider actually
+  returned rather than a blind 2s — doubling from 2s gave up after ~6s while the
+  window still had ~37s to run, which cost a model for the whole refresh.
+- The fan-out is capped at `models × risk profiles` concurrent calls, with
+  holdings queued first, so the burst can't knock out the calls the panel is
+  primarily built around.
+
+If a model keeps running dry, either pair the good one against a model with a
+high daily cap, or set `GROQ_API_KEY` for a second opinion on a separate
+provider's quota (see `.env`).
 
 **Refresh** — regenerates automatically **every two hours during US market
 hours** (and once on startup), and you can force a refresh with the button. The
@@ -449,7 +503,20 @@ instantly and survives restarts.
         }
       ]
     },
-    "high": { … }
+    "high": {
+      … ,
+      // Wishlist buys for this risk profile. Same shape as the profile above,
+      // but pre-filtered to genuine buys — an empty `suggestions` is the normal
+      // case and tells the UI to hide the section entirely.
+      "wishlist": {
+        "portfolio_note": "…",
+        "models": ["gemini:gemini-3.6-flash", "groq:llama-3.3-70b-versatile"],
+        "avg_confidence": 72.5,
+        "agreement": { "agreed": 1, "mixed": 0, "split": 0, "total": 1 },
+        "suggestions": [ { "ticker": "DELL", "confidence": 72.5,
+                           "action": "buy", … } ]
+      }
+    }
   },
   "error": null
 }

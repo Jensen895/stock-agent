@@ -360,10 +360,11 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 .link-btn.danger { color: var(--err); }
 .link-btn:hover { text-decoration: underline; }
 
-/* Below the two-column width, stack the AI advisor under the main content. */
+/* Below the two-column width, stack the AI advisor under the main content.
+   The card's own overrides for this width live with the .ai-card rules below —
+   at equal specificity the later block wins, so they have to come after it. */
 @media (max-width: 1180px) {
   .layout { grid-template-columns: minmax(0, 880px); }
-  .ai-card { position: static; }
 }
 
 @media (max-width: 520px) {
@@ -379,6 +380,51 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 .ai-card {
   position: sticky;
   top: 1rem;
+  display: flex;
+  flex-direction: column;
+  /* Never taller than the column beside it, and never taller than the screen —
+     a sticky card that overflows the viewport can't be scrolled back up to. */
+  max-height: min(100%, calc(100vh - 2rem));
+  margin-bottom: 0; /* the only card in its column — the margin would break the match */
+}
+/* Stretch the aside to the row height so the 100% above has something definite
+   to resolve against; .layout aligns its items to the start otherwise. */
+.ai-col { align-self: stretch; }
+
+/* The calls scroll; the heading, controls and disclaimer around them don't. */
+.ai-card > :not(.ai-body) { flex-shrink: 0; }
+.ai-body {
+  margin-bottom: 0.75rem; /* breathing room above the disclaimer's rule */
+  /* Size to the content, then shrink (and scroll) once the card hits its cap —
+     a 0 flex-basis here would fight the card's auto height when the list is short. */
+  flex: 1 1 auto;
+  min-height: 0; /* without this a flex child refuses to shrink and never scrolls */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Hold the scrollbar clear of the rows without losing the card's padding. */
+  padding-right: 0.5rem;
+  margin-right: -0.5rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.ai-body::-webkit-scrollbar { width: 8px; }
+.ai-body::-webkit-scrollbar-track { background: transparent; }
+.ai-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+.ai-body::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* Stacked under the main content there's no column left to match, and the page
+   itself scrolls — so the card runs full height rather than trapping the calls
+   in a nested scroller. Must sit after the rules above to win the cascade. */
+@media (max-width: 1180px) {
+  .ai-card { position: static; max-height: none; margin-bottom: 1.5rem; }
+  .ai-body {
+    overflow-y: visible;
+    margin-right: 0;
+    padding-right: 0;
+  }
 }
 
 .ai-head {
@@ -470,6 +516,63 @@ td.earnings { color: var(--muted); white-space: nowrap; }
   color: var(--muted);
   font-size: 0.82rem;
   line-height: 1.4;
+}
+.ai-summary .ai-line.trigger { color: var(--accent); font-size: 0.78rem; }
+
+/* Each bullet stacks: the call on top, the per-model numbers under it. Packing
+   all of it onto one line in a 370px column pushed the Details button around
+   unpredictably; splitting it keeps the button pinned to the ticker's right. */
+.ai-row-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-basis: 100%;
+  min-width: 0;
+}
+.ai-row-sub {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+  min-width: 0;
+  margin-top: 0.3rem;
+}
+.ai-row-sub:empty { display: none; }
+/* The band label yields first when the row is tight — the button never moves. */
+.ai-row-top .ai-action { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ai-row-detail-btn {
+  grid-column: auto;
+  margin-left: auto;
+  flex-shrink: 0;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ai-row-detail-btn:hover { background: var(--bg); color: var(--accent); }
+
+.ai-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 1rem 0;
+  border: none;
+}
+.ai-wishlist-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: rgba(56,189,248,0.15);
+  color: var(--accent);
 }
 
 /* Action badge — colored by call: buy green, hold neutral, trim amber, sell red. */
@@ -755,21 +858,6 @@ td.earnings { color: var(--muted); white-space: nowrap; }
   line-height: 1.5;
 }
 
-.ai-details-btn {
-  grid-column: auto;
-  width: 100%;
-  margin-top: 1rem;
-  background: transparent;
-  color: var(--accent);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.55rem 1rem;
-  font-size: 0.88rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-.ai-details-btn:hover { background: var(--bg); }
-
 .ai-back { margin-bottom: 0.5rem; padding-left: 0; }
 
 /* Details view — one card per stock with the ~10-line reasoning. */
@@ -801,8 +889,11 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 }
 .ai-detail .ai-trigger { color: var(--accent); }
 
+/* Sits below the scroll area rather than at the end of the list. */
 .ai-disclaimer {
-  margin: 1rem 0 0;
+  margin: 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
   font-size: 0.7rem;
   color: var(--muted);
   font-style: italic;

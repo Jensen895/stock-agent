@@ -655,9 +655,14 @@ const aiStatusEl = document.getElementById("ai-status");
 const aiSummaryView = document.getElementById("ai-summary-view");
 const aiSummaryList = document.getElementById("ai-summary-list");
 const aiPortfolioNote = document.getElementById("ai-portfolio-note");
-const aiSeeDetailsBtn = document.getElementById("ai-see-details");
+const aiWishlistSection = document.getElementById("ai-wishlist-section");
+const aiWishlistList = document.getElementById("ai-wishlist-list");
+const aiWishlistNote = document.getElementById("ai-wishlist-note");
 const aiDetailsView = document.getElementById("ai-details-view");
+const aiHoldingsDetailsWrap = document.getElementById("ai-holdings-details-wrap");
 const aiDetailsList = document.getElementById("ai-details-list");
+const aiWishlistDetailsWrap = document.getElementById("ai-wishlist-details-wrap");
+const aiWishlistDetailsList = document.getElementById("ai-wishlist-details-list");
 const aiBackBtn = document.getElementById("ai-back");
 const aiRefreshBtn = document.getElementById("ai-refresh");
 const riskToggleEl = document.getElementById("risk-toggle");
@@ -729,6 +734,7 @@ function renderAI() {
     (aiData.risk_profiles && aiData.risk_profiles[risk]) || null;
   renderAiSummary(profile);
   renderAiDetails(profile);
+  renderAiWishlist(profile);
 
   // Keep polling until a running refresh completes.
   if (aiData.refreshing) startAiPoll();
@@ -755,11 +761,20 @@ function setAiStatus() {
     const profile = aiData.risk_profiles[getRisk()];
     const bits = [];
     const modelCount = (profile && profile.models ? profile.models : []).length;
+    const configuredCount = (aiData.models || []).length;
     if (modelCount > 1) {
       bits.push(
         `${modelCount} AI models` +
           (aiData.analysts_configured ? " weighing Wall Street" : ""),
       );
+    } else if (modelCount === 1 && configuredCount > 1) {
+      // A score from one model is not the consensus the panel is built on, and
+      // "N call(s) failed" buries that. Say it plainly instead.
+      bits.push(
+        `only 1 of ${configuredCount} models answered — no consensus, ` +
+          `scores are a single model's view`,
+      );
+      aiStatusEl.className = "ai-status warn";
     }
     const ag = profile && profile.agreement;
     if (ag && ag.total && modelCount > 1) {
@@ -870,33 +885,74 @@ function miniScores(s, modelLabels) {
   return `<span class="ai-minis">${cells}</span>`;
 }
 
+// One summary bullet — shared by the holdings list and the wishlist so both
+// read the same. Laid out over three lines rather than one: the ticker, its
+// score, the call and the Details button sit on top; the per-model numbers and
+// horizon drop underneath. In a 370px column a single line would wrap into a
+// jumble and push the button somewhere unpredictable.
+//
+// ``kind`` tags the row so the details view knows which list to filter.
+function summaryRow(s, models, kind) {
+  const band = bandLabel(s);
+  const ticker = escapeHtml(s.ticker);
+  const sub = [miniScores(s, models), `<span class="ai-horizon">${fmtHorizon(s)}</span>`]
+    .filter(Boolean)
+    .join("");
+  return `<li>
+    <div class="ai-row-top">
+      <span class="ai-ticker">${ticker}</span>
+      ${scorePill(s)}
+      <span class="ai-action ${band.cls}">${escapeHtml(band.text)}</span>
+      <button type="button" class="ai-row-detail-btn" data-ticker="${ticker}"
+        data-kind="${kind}" title="See details for ${ticker}">Details →</button>
+    </div>
+    <div class="ai-row-sub">${sub}</div>
+    ${scoreMeter(scoreOf(s), s.action)}
+    ${s.headline ? `<span class="ai-line">${escapeHtml(s.headline)}</span>` : ""}
+    ${
+      kind === "wishlist" && s.price_trigger
+        ? `<span class="ai-line trigger">↳ ${escapeHtml(s.price_trigger)}</span>`
+        : ""
+    }
+  </li>`;
+}
+
 // Summary: bullet per stock — ticker, the blended score, the band it falls in,
-// the three source scores behind it, horizon, meter.
+// the source scores behind it, horizon, meter.
 function renderAiSummary(profile) {
   const suggestions = (profile && profile.suggestions) || [];
   if (!suggestions.length) {
     aiSummaryList.innerHTML = `<li class="ai-empty">No suggestions yet.</li>`;
     aiPortfolioNote.textContent = "";
-    aiSeeDetailsBtn.hidden = true;
     return;
   }
   const models = (profile && profile.models) || [];
   aiSummaryList.innerHTML = suggestions
-    .map((s) => {
-      const band = bandLabel(s);
-      return `<li>
-        <span class="ai-ticker">${escapeHtml(s.ticker)}</span>
-        ${scorePill(s)}
-        <span class="ai-action ${band.cls}">${escapeHtml(band.text)}</span>
-        ${miniScores(s, models)}
-        <span class="ai-horizon">${fmtHorizon(s)}</span>
-        ${scoreMeter(scoreOf(s), s.action)}
-        ${s.headline ? `<span class="ai-line">${escapeHtml(s.headline)}</span>` : ""}
-      </li>`;
-    })
+    .map((s) => summaryRow(s, models, "holdings"))
     .join("");
   aiPortfolioNote.textContent = (profile && profile.portfolio_note) || "";
-  aiSeeDetailsBtn.hidden = false;
+}
+
+// Wishlist buys (minimized): only rendered when the AI flags a real buy.
+// The backend already dropped everything below the buy threshold, so an empty
+// list means "nothing worth entering today" and the section stays hidden — it
+// doesn't exist until it has something to say.
+function renderAiWishlist(profile) {
+  const wl = (profile && profile.wishlist) || null;
+  const suggestions = (wl && wl.suggestions) || [];
+  if (!aiWishlistSection || !aiWishlistList) return;
+  if (!suggestions.length) {
+    aiWishlistSection.hidden = true;
+    aiWishlistList.innerHTML = "";
+    if (aiWishlistNote) aiWishlistNote.textContent = "";
+    return;
+  }
+  const models = (wl && wl.models) || (profile && profile.models) || [];
+  aiWishlistSection.hidden = false;
+  aiWishlistList.innerHTML = suggestions
+    .map((s) => summaryRow(s, models, "wishlist"))
+    .join("");
+  if (aiWishlistNote) aiWishlistNote.textContent = (wl && wl.portfolio_note) || "";
 }
 
 // The firms behind an analyst score — who upgraded, downgraded, or reiterated.
@@ -1007,39 +1063,83 @@ function streetBlock(s) {
     </div>`;
 }
 
-// Details: one card per stock with the ~10-line reasoning, trigger, and risks.
+// One detail card — the ~10-line reasoning, trigger, and risks. Shared by both
+// lists; a wishlist card is about getting in rather than staying in, so it
+// renames the trigger and carries a badge.
+function detailCard(s, kind) {
+  const band = bandLabel(s);
+  const wishlist = kind === "wishlist";
+  const trigger = s.price_trigger
+    ? `<span class="ai-field-label">${wishlist ? "Entry" : "Price"} trigger</span>
+       <p class="ai-trigger">${escapeHtml(s.price_trigger)}</p>`
+    : "";
+  const risks = s.risks
+    ? `<span class="ai-field-label">Main risk</span>
+       <p>${escapeHtml(s.risks)}</p>`
+    : "";
+  return `<div class="ai-detail${wishlist ? " wishlist" : ""}">
+    <div class="ai-detail-head">
+      <span class="ai-ticker">${escapeHtml(s.ticker)}</span>
+      ${scorePill(s, "lg")}
+      <span class="ai-action ${band.cls}">${escapeHtml(band.text)}</span>
+      <span class="ai-horizon">${fmtHorizon(s)}</span>
+      ${wishlist ? `<span class="ai-wishlist-badge">wishlist</span>` : ""}
+    </div>
+    ${scoreMeter(scoreOf(s), s.action)}
+    <p class="ai-reason">${escapeHtml(s.reasoning)}</p>
+    ${trigger}
+    ${risks}
+    ${sourcesBlock(s)}
+    ${streetBlock(s)}
+  </div>`;
+}
+
+// Details view. A row's "Details →" sets a filter so only that stock's card
+// renders — with two dozen holdings, opening one used to mean scrolling the
+// whole list. Null filter shows everything.
+let aiDetailFilter = null; // { ticker, kind } or null
+
+// Pick the cards a list should show under the current filter: everything when
+// unfiltered, the one ticker when this list owns the filter, nothing when the
+// other list does.
+function detailsFor(suggestions, kind) {
+  const filter = aiDetailFilter;
+  if (!filter) return suggestions;
+  if (filter.kind !== kind) return null; // not our list — stay hidden
+  return suggestions.filter((s) => s.ticker === filter.ticker);
+}
+
 function renderAiDetails(profile) {
   const suggestions = (profile && profile.suggestions) || [];
-  if (!suggestions.length) {
-    aiDetailsList.innerHTML = `<p class="ai-empty">No details yet.</p>`;
+  const toShow = detailsFor(suggestions, "holdings");
+
+  if (toShow === null) {
+    aiHoldingsDetailsWrap.hidden = true;
+    aiDetailsList.innerHTML = "";
+  } else {
+    aiHoldingsDetailsWrap.hidden = false;
+    aiDetailsList.innerHTML = toShow.length
+      ? toShow.map((s) => detailCard(s, "holdings")).join("")
+      : `<p class="ai-empty">No details yet.</p>`;
+  }
+  // Wishlist details lives in its own wrap alongside the holdings details.
+  renderAiWishlistDetails(profile);
+}
+
+function renderAiWishlistDetails(profile) {
+  if (!aiWishlistDetailsWrap || !aiWishlistDetailsList) return;
+  const wl = (profile && profile.wishlist) || null;
+  const suggestions = (wl && wl.suggestions) || [];
+  const toShow = suggestions.length ? detailsFor(suggestions, "wishlist") : null;
+
+  if (toShow === null || !toShow.length) {
+    aiWishlistDetailsWrap.hidden = true;
+    aiWishlistDetailsList.innerHTML = "";
     return;
   }
-  aiDetailsList.innerHTML = suggestions
-    .map((s) => {
-      const band = bandLabel(s);
-      const trigger = s.price_trigger
-        ? `<span class="ai-field-label">Price trigger</span>
-           <p class="ai-trigger">${escapeHtml(s.price_trigger)}</p>`
-        : "";
-      const risks = s.risks
-        ? `<span class="ai-field-label">Main risk</span>
-           <p>${escapeHtml(s.risks)}</p>`
-        : "";
-      return `<div class="ai-detail">
-        <div class="ai-detail-head">
-          <span class="ai-ticker">${escapeHtml(s.ticker)}</span>
-          ${scorePill(s, "lg")}
-          <span class="ai-action ${band.cls}">${escapeHtml(band.text)}</span>
-          <span class="ai-horizon">${fmtHorizon(s)}</span>
-        </div>
-        ${scoreMeter(scoreOf(s), s.action)}
-        <p class="ai-reason">${escapeHtml(s.reasoning)}</p>
-        ${trigger}
-        ${risks}
-        ${sourcesBlock(s)}
-        ${streetBlock(s)}
-      </div>`;
-    })
+  aiWishlistDetailsWrap.hidden = false;
+  aiWishlistDetailsList.innerHTML = toShow
+    .map((s) => detailCard(s, "wishlist"))
     .join("");
 }
 
@@ -1082,15 +1182,51 @@ riskToggleEl.addEventListener("click", (e) => {
   renderAI();
 });
 
-// "See details" / "Back" switch the tab within the AI panel.
-aiSeeDetailsBtn.addEventListener("click", () => {
+// Per-stock "Details →" — one button per row, so opening a stock never means
+// scrolling to the end of the list. Delegated from both summary lists; each
+// button filters the details view to its own ticker.
+function activeProfile() {
+  return (aiData && aiData.risk_profiles && aiData.risk_profiles[getRisk()]) || null;
+}
+function enterDetails(ticker, kind) {
+  aiDetailFilter = { ticker, kind };
+  renderAiDetails(activeProfile());
   aiSummaryView.hidden = true;
   aiDetailsView.hidden = false;
-});
-aiBackBtn.addEventListener("click", () => {
+  // Scrolls the card's body back to the top, and the card itself into view if
+  // the page has been scrolled past it.
+  aiDetailsView.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function exitDetails() {
+  const from = aiDetailFilter;
+  aiDetailFilter = null;
+  renderAiDetails(activeProfile());
   aiDetailsView.hidden = true;
   aiSummaryView.hidden = false;
-});
+  // The list scrolls on its own now, so land back on the row that was opened
+  // rather than at whatever offset the details view left behind.
+  const row =
+    from &&
+    [...document.querySelectorAll(".ai-row-detail-btn")].find(
+      (b) =>
+        b.getAttribute("data-ticker") === from.ticker &&
+        b.getAttribute("data-kind") === from.kind
+    );
+  if (row) row.scrollIntoView({ block: "center" });
+  else aiSummaryView.scrollIntoView({ block: "start" });
+}
+
+function onDetailClick(e) {
+  const btn = e.target.closest(".ai-row-detail-btn");
+  if (!btn) return;
+  const ticker = btn.getAttribute("data-ticker");
+  if (ticker) enterDetails(ticker, btn.getAttribute("data-kind") || "holdings");
+}
+aiSummaryList.addEventListener("click", onDetailClick);
+if (aiWishlistList) aiWishlistList.addEventListener("click", onDetailClick);
+
+// "Back" returns to the summary and clears the per-stock filter.
+aiBackBtn.addEventListener("click", exitDetails);
 
 // Manual refresh: kick off a background regeneration, then poll for the result.
 aiRefreshBtn.addEventListener("click", async () => {
@@ -1181,8 +1317,12 @@ function activePortfolio() {
 }
 
 // Reload every panel — used after the active portfolio changes so the whole UI
-// reflects the newly active workspace.
+// reflects the newly active workspace. Clear any per-stock filter so the new
+// portfolio's suggestions start at the summary.
 function reloadAllPanels() {
+  aiDetailFilter = null;
+  if (aiDetailsView) aiDetailsView.hidden = true;
+  if (aiSummaryView) aiSummaryView.hidden = false;
   loadSummary();
   loadStocks();
   loadWishlist();

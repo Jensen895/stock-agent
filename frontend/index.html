@@ -219,6 +219,10 @@
 
         <p id="ai-status" class="ai-status" role="status"></p>
 
+        <!-- The calls scroll inside the card, so the heading, risk toggle,
+             Refresh and disclaimer stay put however long the list gets. -->
+        <div class="ai-body">
+
         <!-- SUMMARY VIEW: the bullet-point calls at the very top. -->
         <div id="ai-summary-view">
           <span class="ai-subtitle">The next quarter's calls</span>
@@ -232,13 +236,20 @@
             <span class="ai-legend-end pos">buy · 100</span>
           </div>
 
+          <!-- Every row carries its own "Details" button, so a long list
+               never means scrolling to the bottom to open one stock. -->
           <ul id="ai-summary-list" class="ai-summary">
             <li class="ai-empty">No suggestions yet.</li>
           </ul>
           <p id="ai-portfolio-note" class="ai-note"></p>
-          <button id="ai-see-details" class="ai-details-btn" type="button" hidden>
-            See details →
-          </button>
+
+          <!-- WISHLIST BUYS (minimized): only when AI flags a good entry. -->
+          <div id="ai-wishlist-section" hidden>
+            <div class="ai-divider"></div>
+            <span class="ai-subtitle">⭐ Wishlist — good entries now</span>
+            <ul id="ai-wishlist-list" class="ai-summary"></ul>
+            <p id="ai-wishlist-note" class="ai-note"></p>
+          </div>
         </div>
 
         <!-- DETAILS VIEW: the ~10-line reasoning per stock (a separate tab). -->
@@ -246,8 +257,18 @@
           <button id="ai-back" class="link-btn ai-back" type="button">
             ← Back to summary
           </button>
-          <div id="ai-details-list" class="ai-details"></div>
+          <div id="ai-holdings-details-wrap" hidden>
+            <span class="ai-subtitle">📊 Holding details</span>
+            <div id="ai-details-list" class="ai-details"></div>
+          </div>
+          <div id="ai-wishlist-details-wrap" hidden>
+            <div class="ai-divider"></div>
+            <span class="ai-subtitle">⭐ Wishlist details</span>
+            <div id="ai-wishlist-details-list" class="ai-details"></div>
+          </div>
         </div>
+
+        </div><!-- /.ai-body -->
 
         <p class="ai-disclaimer">AI-generated. Not financial advice — verify
           before you trade.</p>
