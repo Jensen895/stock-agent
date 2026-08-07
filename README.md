@@ -33,8 +33,8 @@ everything goes through the API — so either side can be swapped independently.
 - **Storage layer** (`backend/storage/`) — an abstract `StorageBackend`
   interface plus a local `JSONStorage` implementation.
 - **Portfolios layer** (`backend/workspace.py`) — lets you keep several separate
-  portfolios (holdings + wishlist + sales + AI suggestions each), switch between
-  them, and name/create/delete them. `WorkspaceManager` tracks which portfolio is
+  portfolios (holdings + wishlist + sales + AI suggestions + agent weights each),
+  switch between them, and name/create/delete them. `WorkspaceManager` tracks which portfolio is
   active and **persists that choice**, so the app reopens on whichever one you
   last used. `WorkspaceStorage` is a `StorageBackend` that redirects every read/
   write to the *active* portfolio's files, so switching portfolios repoints every
@@ -51,33 +51,42 @@ everything goes through the API — so either side can be swapped independently.
   rating, the bull / hold / bear head count, the price-target spread, and the
   recent calls of individual desks (Goldman Sachs, JP Morgan, Morgan Stanley,
   …), plus the disagreement between them made explicit. **No API key** — it
-  reuses the Yahoo session the market layer already holds. This is *evidence
-  fed to both models*, not a scoring source — see
-  [Wall Street is an input, not a vote](#wall-street-is-an-input-not-a-vote).
+  reuses the Yahoo session the market layer already holds. This is the sole
+  evidence base of the **Wall Street agent**, and no other agent sees it.
 - **Fundamentals layer** (`backend/fundamentals_data.py`) —
-  `YahooFundamentalsProvider`, an I/O boundary onto what those firms are
-  **looking at**: trailing valuation multiples, margins and returns, growth,
-  cash and debt, beta, the 52-week range, short interest, and the actual EPS
-  printed over the last four quarters. This one *does* go into the models'
-  prompt, so a model weighing a Strong Buy rating knows whether the stock
-  trades at 12x earnings or 160x. An **allowlist** of 35 named fields decides
-  what crosses over, keeping the prompt focused and its token cost
-  predictable.
-- **AI advisor layer** (`backend/ai_advisor.py`, `backend/news_data.py`) — a
-  daily agent that composes the portfolio + market data with recent news, asks
-  the LLMs for a one-to-three-month view, and blends their answers with the analyst
-  consensus into **one 0-100 confidence score per holding**. The LLM is
-  pluggable via `AI_PROVIDER`: `GeminiClient` (Google's free API, the default),
-  `GroqClient` (Groq's free API), `LlamaClient` (Meta's internal Llama API),
-  `OllamaClient` (a local model — no key, nothing leaves the machine), or
-  `ClaudeClient` (the public Claude API). `AI_PROVIDER` takes a *list*, and
-  **two models are asked every refresh** and the score is the average of their
-  two answers. News comes from
-  `CompositeNewsProvider` — Yahoo Finance first, Google News RSS as a fallback,
-  **neither needing an API key**. Every client and provider is an I/O boundary
-  (stdlib `urllib` only, like the market layer); `AIAdvisorService` holds the
-  logic and the every-2h refresh. Served over `/api/ai`; degrades gracefully
-  when a model, key, or source isn't available.
+  `YahooFundamentalsProvider`, an I/O boundary onto the figures: trailing
+  valuation multiples, margins and returns, growth, cash and debt, beta, the
+  52-week range, short interest, the actual EPS printed over the last four
+  quarters, and what the company actually does. An **allowlist** of named
+  fields decides what crosses over, and `ai_agents.py` then **splits that
+  allowlist in two** — growth and the earnings record go to the company agent,
+  the multiples and the balance sheet go to the statistics agent, with no
+  overlap.
+- **News layer** (`backend/news_data.py`) — two kinds, deliberately kept apart.
+  `CompositeNewsProvider` (Yahoo Finance → Google News RSS → optional Finnhub)
+  answers *per ticker* and feeds the company agent; `MacroNewsProvider` asks
+  Google News a standing set of topic queries — rates, inflation, tariffs, war,
+  energy, policy — and feeds the macro agent. **Neither needs an API key.**
+  Separating them is what guarantees the macro agent can't quietly re-derive
+  the company agent's answer from the same headlines.
+- **Agents layer** (`backend/ai_agents.py`) — the five analysts, each with a
+  role, a system prompt, and (crucially) a **disjoint slice** of the evidence:
+  company perspective, your own position and price history, raw statistics,
+  Wall Street, and macro/policy. This module decides who may see what; adding a
+  sixth agent is adding a class here.
+- **AI advisor layer** (`backend/ai_advisor.py`) — the orchestration. Gathers
+  the evidence once, runs the five agents concurrently over their own slices,
+  and averages their scores with the per-portfolio weights into **one 0-100
+  confidence score per stock**. The LLM is pluggable via `AI_PROVIDER`:
+  `GeminiClient` (Google's free API, the default), `GroqClient` (Groq's free
+  API), `LlamaClient` (Meta's internal Llama API), `OllamaClient` (a local
+  model — no key, nothing leaves the machine), or `ClaudeClient` (the public
+  Claude API). `AI_PROVIDER` takes a *list*, and agents are handed out
+  round-robin across it — **models are capacity, not opinion**. Every client
+  and provider is an I/O boundary (stdlib `urllib` only, like the market
+  layer); `AIAdvisorService` holds the logic and the daily opening-bell
+  refresh. Served over `/api/ai`; degrades gracefully when a model, key, or
+  source isn't available.
 
 ### Why it's flexible / reusable
 
@@ -214,18 +223,19 @@ its next upcoming earnings report date, fetched from the market data provider.
 
 ### AI Advisor
 
-A daily AI agent that turns your portfolio into a **confidence score** per
-holding for the next one to three months. It sits in its own column on the right of everything
-else.
+Five independent AI agents turn your portfolio into **one confidence score per
+stock** for the next one to three months. It sits in its own column on the right
+of everything else.
 
-| Method | Path             | Purpose                                          | Body |
-| ------ | ---------------- | ------------------------------------------------ | ---- |
-| GET    | `/api/ai`        | Latest suggestions (cached) + status             | —    |
-| POST   | `/api/ai/refresh`| Trigger a background regeneration                 | —    |
+| Method | Path              | Purpose                                          | Body |
+| ------ | ----------------- | ------------------------------------------------ | ---- |
+| GET    | `/api/ai`         | Latest suggestions (cached) + status             | —    |
+| POST   | `/api/ai/refresh` | Trigger a background regeneration                 | —    |
+| POST   | `/api/ai/weights` | Set how much each agent counts, and re-blend      | `{"weights": {"statistics": 2, "expert": 0, …}}` |
 
 #### The confidence score
 
-Every holding gets **one number from 0 to 100**, and the number *is* the call:
+Every stock gets **one number from 0 to 100**, and the number *is* the call:
 
 ```
   0 ──────────── 25 ──────────── 50 ──────────── 75 ──────────── 100
@@ -237,96 +247,136 @@ the stronger the buy (above) or sell (below) signal. The panel shows the number,
 the band it falls in ("Strong buy", "Lean trim", …), and a meter marking how far
 from neutral it is.
 
-That score is the **weighted average of the two AI models, and nothing else**.
+That score is the **weighted average of the five agents**, and nothing else.
 
-| # | Source     | Where it comes from                                     |
-| - | ---------- | -------------------------------------------------------- |
-| 1 | AI model A | first entry in `AI_PROVIDER`, scores each holding 0-100    |
-| 2 | AI model B | second entry, asked the same question independently        |
+#### The five agents
 
-**Weights** are equal by default. To lean on one model, set `AI_SOURCE_WEIGHTS`
-keyed by its label:
+Each agent is a separate LLM call with its own system prompt and its own slice
+of the evidence. They run concurrently, they never see each other's answers, and
+the slices **do not overlap**.
+
+| Tag | Agent | Its question | What it sees — and *only* this |
+| --- | ----- | ------------ | ------------------------------ |
+| `CO` | Company perspective | Is the business on the right track? | What the company does, sector/industry, recent company headlines, next earnings date, four quarters of actual EPS vs. expectations, revenue & earnings growth |
+| `ME` | My position & history | Does this match the setups that have worked? | Shares, average cost, unrealized P&L, a year of weekly closes, measured returns over 1/3/6/12m, distance from the 52-week range and the 50/200-day averages, annualised volatility, your own past sales of the name |
+| `ST` | Raw statistics | Do the numbers justify the price? | P/E (trailing & forward), PEG, EPS, market cap, P/S, P/B, EV/EBITDA, margins, ROE/ROA, cash, debt, debt/equity, current ratio, free cash flow, beta, 52-week range, short interest, institutional ownership |
+| `WS` | Wall Street experts | What do the big desks conclude? | Consensus rating and 1-5 mean, bull/hold/bear head count, mean/high/low price targets and what each implies, recent upgrades & downgrades by firm, the disagreement note |
+| `MA` | Macro & policy | Does the wider world favour owning this? | Market-wide headlines with **no company in them** — rates, inflation, tariffs, war, energy, regulation, policy — plus, per ticker, only its sector, industry, beta and market cap |
+
+All five answer on the same 0-100 scale, so the average means something. An
+agent whose own evidence is silent on a ticker is told to score it near 50 and
+say so, rather than borrow conviction it hasn't earned.
+
+**Why disjoint evidence, and not just disjoint questions.** Averaging opinions
+only buys you something when the errors are uncorrelated. The design this
+replaced showed *two models the same evidence* — including the same analyst
+research — and averaged them, which measured how often two models read one
+paragraph the same way and reported it as confirmation. So the fundamentals are
+split down the middle (growth and the earnings record to `CO`, the multiples and
+the balance sheet to `ST`), the two news feeds are separate providers, and only
+the price appears in more than one payload, because a multiple without a price
+isn't a number.
+
+**The cost, stated plainly.** Each agent is *less informed* than the single
+all-seeing model it replaced. `ST` scores a 160x P/E without knowing a product
+just shipped; `CO` reads the product news without knowing what the market
+already charges for it. Neither is wrong about its own dimension — but no single
+agent's reasoning is a complete argument any more, so the detail card shows all
+five instead of one tidy verdict. Reconciling them is the average's job, and the
+weights are yours.
+
+**Independence is structural, not advisory.** The prompts also say it (models
+that sense they're seeing a partial picture start hedging toward an imagined
+consensus, which is exactly the correlated error the split exists to avoid), but
+the guarantee is that the evidence physically isn't in the context window.
+
+#### The weighting system
+
+Weights are **equal by default** — 20% each. Nothing about the five dimensions
+says one deserves more say a priori, so any imbalance should be a choice you
+made, not one the app made quietly.
+
+Open **⚖️ Agent weights** in the panel and drag. The summary line shows each
+agent's actual share of the score (`CO 33% · ME 17% · ST 33% · WS 17% · 1 off`),
+which is the number that matters — a weight of 2 means nothing until you know
+what the others are. Setting one to **0 silences that agent entirely**, which is
+a legitimate thing to want: *"I don't care what Wall Street thinks."*
+
+**Applying re-blends instantly and calls no model.** Every suggestion carries
+the raw per-agent scores, so a new average is arithmetic over data already on
+disk. You can dial `ST` to 2× and `MA` to 0 and watch the whole panel resettle —
+scores, bands, meters, the wishlist filter — without spending a token or waiting
+on a refresh. Weights are stored **per portfolio** (`ai_weights.json`), for the
+same reason the risk toggle is: a speculative watchlist and a retirement account
+deserve different priors.
+
+To set a house default for new portfolios, use `AI_AGENT_WEIGHTS` (a saved
+per-portfolio weight always wins over it):
 
 ```bash
-AI_SOURCE_WEIGHTS="gemini:gemini-3.6-flash=2"   # double this one
+AI_AGENT_WEIGHTS="statistics=2,macro=0.5"
+AI_AGENT_WEIGHTS="expert=0"        # ignore Wall Street entirely
 ```
 
-A model that doesn't answer for a ticker drops out and the remaining weight is
-**renormalised**, so a lone survivor's score passes through unchanged rather
-than being dragged toward neutral by the gap.
+An agent that doesn't answer for a ticker — its call failed, or it had no
+evidence — drops out and the remaining weights are **renormalised**, so a lone
+survivor's score passes through unchanged rather than being dragged toward
+neutral by the gap. The status line says when that happens, naming the missing
+dimension, because a score blended from three agents is not the one from five.
 
-#### Wall Street is an input, not a vote
+#### Disagreement is the product
 
-The sell-side research — Goldman Sachs, JP Morgan, Morgan Stanley and the rest
-— goes **into both models' prompts** as evidence. Each model weighs it against
-the fundamentals, the momentum and the news, then reaches its own number. The
-firms never score anything directly.
+A consensus label hides the interesting part, and with five deliberately narrow
+views the disagreement *is* the finding. Each detail card states it outright —
+*"the agents are split — read all five"* — and each summary row shows the five
+raw numbers next to the average, in fixed positions so the same slot always
+means the same agent:
 
-|                                                              | Read by the models | Scores anything |
-| ------------------------------------------------------------ | :----------------: | :-------------: |
-| Consensus rating and 1-5 mean, bull/hold/bear head count       | ✅ | ❌ |
-| Price targets: mean, high, low, and what each implies from here | ✅ | ❌ |
-| Which firms upgraded, downgraded, initiated or reiterated       | ✅ | ❌ |
-| Fundamentals, momentum, gain history, news                      | ✅ | ❌ |
-| **The two AI models' own 0-100 conviction**                     | —  | ✅ |
+```
+NVDA   54   Hold      CO 88 · ME 34 · ST 22 · WS 74 · MA 51     over 2 months
+```
 
-**Why it changed.** An earlier version averaged the street in as a third,
-independent source. Mechanical averaging turned out to be the wrong tool.
-Measured across a real 23-holding portfolio, the consensus mean only ever ranged
-**1.3 to 3.5 of a nominal 1-5 scale**, and **22 of 23 stocks scored above 50** —
-the desks essentially never publish a bearish rating. Any fixed mapping onto a
-0-100 conviction scale is therefore mis-centred by construction, and the blend
-inherited a systematic upward bias that no choice of weights really fixed. (The
-horizon was the other suspect and it was not the cause: matching the models'
-timescale to the street's twelve-month view moved the gap by less than a point.)
+That row is a genuinely useful thing to see: the business is executing, the
+street likes it, the chart broke, and the multiple is rich. A single model would
+have written you one paragraph that landed on "hold" and buried which of those
+four facts did the work.
 
-A model can do what an average cannot — notice the skew and discount it. So the
-prompt states plainly that sell-side ratings are structurally bullish, that a
-"Buy" is closer to their neutral than to real enthusiasm, and that a fresh
-downgrade tells you more than a standing rating. Each model must say in its
-reasoning what it made of the street's view and whether it sided with it.
+Grading is by **spread** (highest minus lowest) rather than by comparing action
+labels — on a continuous scale 50 vs. 55 is agreement that happens to straddle a
+band edge, while 50 vs. 92 is a real split even though both are nominally "buy".
+The thresholds widen with the number of agents (22/46 points at five, 15/35 at
+two), because the spread of five draws is naturally wider than the spread of two
+even when they describe the same thing; held at the old numbers, five narrow
+views would have read as "split" on essentially every ticker — true in a useless
+way.
 
-**Surfacing the contradictions.** A consensus label hides the interesting part.
-"Buy, 2.07/5" can mean forty desks quietly agreeing or a genuine fight, and the
-second is a far weaker signal. So the models also get the disagreement spelled
-out — the bull/bear split, how wide the price targets are spread relative to
-their mean, what the extremes imply from today's price, how many firms upgraded
-versus downgraded — plus a one-line `disagreement_note`:
+#### What it reads
 
-> 41 of 51 ratings are buy with none saying sell and 10 on hold; price targets
-> run $320 to $1,250 (161% of the mean target), implying anything from −34% to
-> +159% from here
-
-It works. Every call now engages with the street explicitly — for example
-*"While Wall Street rates AMD a Strong Buy with a mean target of $579.11, the
-vast spread ($320 to $1,250) indicates high uncertainty"*, against a model that
-agreed elsewhere: *"We align with this view as Broadcom boasts phenomenal
-fundamentals: 48.98% operating margins, 37.28% ROE."*
-
-**The trade-off, stated plainly.** The two remaining sources are no longer
-independent of each other, since both read the same street view. When they
-agree, that is weaker evidence than it was when one of the three opinions was
-formed without seeing the others. What is gained is that the street's view is
-now *reasoned about* rather than averaged in.
-
-**What it reads** — everything the app already computes, plus fundamentals,
-analyst research and news:
+Everything the app already computes, plus fundamentals, analyst research and two
+kinds of news — then split five ways as in the table above:
 
 - all your holdings, share counts, average cost, and cost basis,
-- the current market price and today's move (momentum),
-- the full unrealized-gain history (1D / 1W / 1M / YTD / 1Y / Total),
-- realized gains from the sales log,
+- a year of daily closes per ticker, **measured** into returns, drawdown, trend
+  and volatility before it reaches a prompt (a model handed 250 closes and asked
+  for a six-month return usually gets it roughly right, occasionally gets it
+  badly wrong, and always spends tokens on it),
+- realized gains from the sales log, including your own past exits per ticker,
 - **company fundamentals per ticker** — trailing and forward P/E, PEG, P/S, P/B
   and EV/EBITDA, gross / operating / net margins, ROE and ROA, year-over-year
   revenue and earnings growth, cash, debt, debt/equity, current ratio, free and
   operating cash flow, beta, the 52-week range, 50- and 200-day averages, short
-  interest, institutional ownership, and the last four quarters of actual EPS
-  with how far each beat or missed,
-- **the Wall Street research** described above,
-- recent news headlines per ticker over the last 30 days (Yahoo Finance, falling
-  back to Google News RSS — no API key needed for either).
+  interest, institutional ownership, the last four quarters of actual EPS with
+  how far each beat or missed, and what the business actually sells,
+- **the Wall Street research** — consensus, head count, target spread, and which
+  firms moved lately,
+- **company news** over the last 30 days (Yahoo Finance, falling back to Google
+  News RSS),
+- **macro news** over the last 14 days across six standing topics (rates,
+  inflation/jobs, tariffs, market outlook, geopolitics/energy, policy), merged
+  by interleaving so one busy topic — there is always something about the Fed —
+  can't crowd the others out.
 
-**Why the news matters.** The models are never asked to search; they are handed
+**Why the news matters.** The agents are never asked to search; they are handed
 headlines. Two reasons. Free-tier Gemini *cannot* use Google Search grounding —
 adding the `google_search` tool makes the request fail outright with
 `429 RESOURCE_EXHAUSTED` while the same ungrounded request succeeds. And a model
@@ -334,111 +384,130 @@ asked about "recent news" with none supplied does not say "I don't know": it
 invents specific, confident, wrong headlines. Real headlines are what keep the
 suggestions honest.
 
-**What it suggests** — for each holding: the confidence score and the band it
-implies (**buy more**, **hold**, **sell part**, **sell all**), with a horizon of
-**one to three months**, a concrete price trigger where relevant (e.g. "add
-below $280; if it closes under $240 the thesis is broken, sell"), and the
-reasoning behind the call.
+#### What it suggests
+
+For each stock: the confidence score and the band it implies (**buy more**,
+**hold**, **sell part**, **sell all**), with a horizon of **one to three
+months**, and — per agent — that agent's own headline, its 3-6 line argument
+citing the figures it actually used, a concrete price trigger where its evidence
+supports one, and the main risk to *its* call.
+
+There is deliberately **no blended paragraph**. Five agents wrote five arguments
+from five separate bodies of evidence; flattening them into one would invent a
+synthesis nobody performed. The summary line is the headline of whichever agent
+moved the score most (weight × distance from neutral), tagged with that agent so
+it doesn't read as a consensus view.
 
 **Risk toggle** — every refresh generates two sets, one **low-risk** and one
 **high-risk**; the toggle switches between them instantly with no new API call.
-Low risk prioritises protecting capital; high risk prioritises upside.
-
-**Agreement** — each row shows the three source scores next to the average, so
-you can see the spread yourself rather than read a badge about it. The backend
-still grades it for the aggregate status line, measured as the **spread**
-between scores rather than by comparing labels: within 15 points is `agree`,
-more than 35 apart is `split`, anything between is `mixed`. Comparing labels
-instead flagged nearly every holding as split, since the street rarely publishes
-anything below "buy". The first model in `AI_PROVIDER` leads and supplies the
-prose. This is affordable because the job is tiny — two risk profiles times two
-models, a few times a day, at roughly 1.5k input tokens a call — and every call
-(analyst ratings included) runs concurrently, so a refresh takes about 40s
-rather than the sum of its parts. With one model configured, calls are marked
-`single` and nothing else changes.
+Each agent applies the stance inside its own lens rather than as a
+portfolio-level instruction it has no way to act on.
 
 **Two guardrails on the model output**, both earning their keep on real runs:
 
 - *Scale inversion.* Models sometimes read "confidence" as certainty in their
   own recommendation, returning `100` next to `"sell"` — the exact inverse of
-  what the number means here. One flipped vote moves a blended score by ~30
-  points, so the action enum bounds the score: a score outside its action's
-  range is pulled to the nearest edge, and the correction is logged.
-- *Invented tickers.* A model answering for `HIMSS` when you hold `HIMS` would
+  what the number means here. One flipped vote moves a blended score, so the
+  action enum bounds the score: a score outside its action's range is pulled to
+  the nearest edge, and the correction is logged.
+- *Invented tickers.* An agent answering for `HIMSS` when you hold `HIMS` would
   add a phantom position to the panel, so rows are anchored to your actual
   holdings and unknown symbols are dropped.
 
-**The UI**
+#### The UI
 
 - A **summary** at the very top: one bullet per stock — ticker, the blended
-  score, the band it falls in, then **the three numbers behind it** in smaller
-  type (`AI 30 · AI 20 · WS 88`), and over how many months — plus a meter, a
-  one-line rationale, and an overall portfolio note. The three always appear in
-  the same order (model A, model B, Wall Street), so the last one is always the
-  street; a source with no score for that ticker shows an em dash, and hovering
-  any number names its source. The status line reads e.g. "3 sources (2 AI +
-  Wall Street) — 9/23 agreed · 8 split — avg score 65".
+  score, the band it falls in, then **the five numbers behind it** in smaller
+  type (`CO 88 · ME 34 · ST 22 · WS 74 · MA 51`), and over how many months —
+  plus a meter and the leading agent's one-line rationale. The five always
+  appear in roster order, so a reader learns where to look; an agent with no
+  score for that ticker shows an em dash, a zero-weighted one is struck through
+  rather than hidden (it still has a view, it just isn't counted), and hovering
+  any number names the agent, its band and its weight.
+- Below the list, **one portfolio note per agent**, each tagged — kept separate
+  rather than merged, because they were written from different evidence.
 - Every row carries its own **Details →** button, which switches to a details
-  tab showing *that stock only*: the ~10-line reasoning, its price trigger, its
-  main risk, and the full per-source breakdown including the individual firms.
-  With two dozen holdings a single button at the bottom of the list meant
-  scrolling past everything to open anything, so the affordance lives on each
-  row instead. **Back to summary** returns and clears the filter.
+  tab showing *that stock only*: the consensus badge, then **all five agents
+  side by side** — score, meter, weight, headline, reasoning, trigger and risk —
+  followed by the raw Wall Street research the `WS` agent read. With two dozen
+  holdings a single button at the bottom of the list meant scrolling past
+  everything to open anything, so the affordance lives on each row instead.
+  **Back to summary** returns and clears the filter.
+- The status line reads e.g. *"5 independent agents — 9/23 agreed · 8 split —
+  avg score 65"*, and turns amber with the missing dimension named when an agent
+  drops out.
 
 <a id="wishlist-buys"></a>
 **Wishlist buys** — under the holdings calls sits a second, deliberately
-minimal section: the AI's read on whether now is a good time to *enter* the
+minimal section: the agents' read on whether now is a good time to *enter* the
 stocks on your wishlist.
 
-- Every wishlist ticker is scored on each refresh, with the same data the
-  holdings get (live price, fundamentals, news, Wall Street) but a separate
-  prompt and system prompt — the question is entry timing, not whether to keep
-  holding. `confidence` reads as 100 = buy now, 50 = wait, 0 = avoid.
+- Every wishlist ticker is scored by all five agents on each refresh, from the
+  same slices but a separate framing — the question is entry timing, not whether
+  to keep holding. `confidence` reads as 100 = buy now, 50 = wait, 0 = avoid.
+  The `ME` agent has no position to look at, so it judges the price-history
+  pattern alone.
 - **Only genuine buys are shown.** A name survives to the UI only if the blended
   call is `buy` *and* scores at least `_WISHLIST_MIN_CONFIDENCE` (55). Everything
-  in the wait band is dropped server-side, and when nothing clears the bar the
-  section is hidden outright — it doesn't render as an empty box or a wall of
-  "not yet". Survivors are sorted by conviction, highest first.
+  in the wait band is dropped, and when nothing clears the bar the section is
+  hidden outright — it doesn't render as an empty box or a wall of "not yet".
+  Survivors are sorted by conviction, highest first.
+- The full blended list is still kept server-side as `candidates`, because the
+  weights are adjustable: raise `ST` and a name that was just under the line has
+  to be able to come back, which it can't if the losers were discarded at
+  generation time.
 - The panel's wishlist counters (`avg_confidence`, `agreement`) describe the
   kept buys, not the whole watchlist — an average over names nobody suggested
   buying would be noise.
-- Each surviving row shows its entry trigger inline and has its own
-  **Details →**, which opens the same detail card under a *Wishlist details*
-  heading with a `wishlist` badge.
 
-**Cost of the extra calls — watch your daily quota.** Because holdings and
-wishlist are asked separately, a refresh fans out `risk profiles × models × 2`
-calls instead of `× 1` — 8 on the default two-model setup, every two hours
-during market hours. Against a free tier that grants a *daily* allowance per
-model (`gemini-3.6-flash` gets 20 requests/day), that budget is gone in about
-two refreshes, and for the rest of the day that model 429s on every call.
+#### Cost — watch your daily quota
 
-The panel keeps working — one model failing still produces suggestions — but the
-scores stop being a consensus and become one model's opinion, which is easy to
-miss. So:
+A refresh fans out `5 agents × 2 risk profiles × {holdings, wishlist}` = up to
+**20 calls**, against 8 before. Each prompt is much smaller (one slice, not the
+whole picture), but the *call count* is what free tiers meter. Against a tier
+that grants a daily allowance per model (`gemini-3.6-flash` gets 20
+requests/day), one refresh can exhaust it.
 
-- The status line says it outright, in amber: *"only 1 of 2 models answered — no
-  consensus, scores are a single model's view"*.
+The panel keeps working — four agents still produce a score — but it stops being
+the five-way average it's built around, which is easy to miss. So:
+
+- The status line says it outright, in amber: *"only 4 of 5 agents scored — no
+  MA view in these numbers"*.
+- **Agents fall back across models.** With more than one provider configured, an
+  agent whose assigned model is rate-limited retries on the next one before
+  giving up. Losing an agent costs a whole dimension of the score, which is far
+  worse than one extra call against a second provider's quota.
 - A daily-quota 429 is **not** retried. The provider still suggests a retry
   delay for one (Gemini says 9s), but a daily allowance doesn't return before it
   resets, so retrying only holds a worker open and stalls the refresh. The quota
   id from the error's `details` is appended to the message so
   `_is_transient()` can tell a daily cap from a per-minute burst.
-- A per-minute 429 *is* retried, and now waits the delay the provider actually
+- A per-minute 429 *is* retried, and waits the delay the provider actually
   returned rather than a blind 2s — doubling from 2s gave up after ~6s while the
   window still had ~37s to run, which cost a model for the whole refresh.
-- The fan-out is capped at `models × risk profiles` concurrent calls, with
-  holdings queued first, so the burst can't knock out the calls the panel is
-  primarily built around.
+- The fan-out is capped at `models × 2` concurrent calls, with holdings queued
+  first, so the burst can't knock out the calls the panel is primarily built
+  around.
 
-If a model keeps running dry, either pair the good one against a model with a
-high daily cap, or set `GROQ_API_KEY` for a second opinion on a separate
-provider's quota (see `.env`).
+**Configure more than one provider.** Unlike before, a second and third model
+buy you nothing in *opinion* — the consensus is between agents now — but they
+buy parallelism and quota headroom, which is what actually keeps all five agents
+alive. Set `GROQ_API_KEY` alongside your Gemini key (see `.env`); agents are
+spread round-robin, so three providers means roughly seven calls each.
 
-**Refresh** — regenerates automatically **every two hours during US market
-hours** (and once on startup), and you can force a refresh with the button. The
-latest result is cached (and persisted to `data/ai_suggestions.json`) so it shows
-instantly and survives restarts.
+**Refresh** — regenerates automatically **once per trading day, at the opening
+bell** (9:30 AM ET), plus once on startup if nothing is cached. You can force one
+any time with the button; changing weights does *not* trigger one. The latest
+result is cached (and persisted per portfolio) so it shows instantly and survives
+restarts, and the panel shows when the next refresh is due next to the last one.
+
+The trigger is **the bell, not an elapsed timer**, which matters in two ways. It
+**catches up**: a laptop asleep at 9:30 refreshes as soon as it wakes rather than
+skipping the day, so you never open the app to yesterday's numbers with no way to
+know they're stale. And it **can't double-fire**: restarting the app ten times
+after the open regenerates nothing, because the cached result is already newer
+than today's bell. Catch-up means an occasional refresh outside market hours — at
+most one, and only when a day was genuinely missed.
 
 `GET /api/ai` returns:
 
@@ -446,44 +515,71 @@ instantly and survives restarts.
 {
   "configured": true,          // whether a model is configured (Ollama: always true)
   "models": ["gemini:gemini-3.6-flash", "groq:llama-3.3-70b-versatile"],
+  // The roster, so the UI renders the weight controls and the per-agent
+  // breakdown generically rather than hardcoding five.
+  "agents": [
+    { "key": "company_perspective", "name": "Company perspective",
+      "short": "CO", "focus": "The business itself: news, what it sells …" },
+    { "key": "personal", "name": "My position & history", "short": "ME", … },
+    { "key": "statistics", "name": "Raw statistics", "short": "ST", … },
+    { "key": "expert", "name": "Wall Street experts", "short": "WS", … },
+    { "key": "macro", "name": "Macro & policy", "short": "MA", … }
+  ],
+  "agent_weights": { "company_perspective": 1.0, "personal": 1.0,
+                     "statistics": 2.0, "expert": 0.0, "macro": 1.0 },
+  "default_agent_weights": { … },   // what Reset restores
   "news_configured": true,     // the keyless sources make this true by default
   "news_sources": "Yahoo → GoogleNewsRSS",
-  "analysts_configured": true, // Wall Street: evidence in both prompts (keyless)
+  "analysts_configured": true,      // the WS agent has something to read
   "analyst_source": "Yahoo Finance analyst ratings",
-  "fundamentals_configured": true,  // also prompt-side, not a scoring source
+  "fundamentals_configured": true,  // the CO and ST agents have figures
   "fundamentals_source": "Yahoo Finance fundamentals",
-  "source_weights": { "model": 1.0 },   // only the AI models carry weights
+  "macro_configured": true,         // the MA agent has a tape
+  "macro_source": "Google News RSS · 6 macro topics",
   "refreshing": false,         // true while a regeneration is in flight
   "market_open": true,
-  "refresh_hours": 2,
-  "generated_at": "2026-07-30T14:00:00+00:00",
-  "model_errors": null,        // non-null if a model failed but others answered
+  "refresh_schedule": "daily at market open",
+  "next_refresh": "2026-08-10T13:30:00+00:00",   // the next opening bell, UTC
+  "generated_at": "2026-08-07T14:00:00+00:00",
+  "model_errors": null,        // non-null if an agent failed but others answered
   "risk_profiles": {
     "low": {
-      "portfolio_note": "…",
+      // One note per agent on the whole list, not a merged summary.
+      "portfolio_notes": [
+        { "key": "macro", "name": "Macro & policy", "short": "MA", "note": "…" }
+      ],
+      // Which agents answered, and which model ran each.
+      "agents": [ { "key": "statistics", "name": "Raw statistics",
+                    "short": "ST", "model": "groq:llama-3.3-70b-versatile" } ],
       "models": ["gemini:gemini-3.6-flash", "groq:llama-3.3-70b-versatile"],
       "avg_confidence": 61.4,
       "agreement": { "agreed": 2, "mixed": 1, "split": 1, "total": 4 },
       "suggestions": [
         {
           "ticker": "AAPL",
-          "confidence": 71.1,              // the blend — 0-100, 50 = hold
+          "confidence": 71.1,              // the weighted average — 50 = hold
           "action": "buy",                 // the band it falls in
           "confidence_label": "Buy",
           "horizon_months": 2,
-          "headline": "…", "reasoning": "…", "price_trigger": "…", "risks": "…",
           "consensus": "agree",            // agree | mixed | split | single
+          "headline": "…",                 // from the agent that moved it most
+          "headline_from": "company_perspective",
+          // The whole argument: one entry per agent, each with its own case.
+          // This is what makes reweighting free — the raw scores are right here.
           "sources": [
-            { "kind": "model", "name": "gemini:gemini-3.6-flash",
-              "confidence": 80.0, "action": "buy", "label": "Strong buy",
-              "weight": 1.0, "detail": "…" },
-            { "kind": "model", "name": "groq:llama-3.3-70b-versatile",
-              "confidence": 60.0, "action": "buy", "label": "Lean buy",
-              "weight": 1.0, "detail": "…" },
+            { "kind": "agent", "key": "company_perspective",
+              "name": "Company perspective", "short": "CO", "focus": "…",
+              "model": "gemini:gemini-3.6-flash",
+              "confidence": 88.0, "action": "buy", "label": "Strong buy",
+              "weight": 1.0, "horizon_months": 2,
+              "detail": "…",          // this agent's headline
+              "reasoning": "…", "price_trigger": "…", "risks": "…" },
+            { "kind": "agent", "key": "statistics", "short": "ST",
+              "confidence": 22.0, "action": "trim", "label": "Trim",
+              "weight": 2.0, … }
           ],
-          // The research BOTH models read before scoring. Carries no score and
-          // takes no part in the average — it is kept so the UI can show the
-          // evidence they reasoned from.
+          // The research the WS agent read, kept so the card can show it. It
+          // carries no score of its own and no other agent saw it.
           "wall_street": {
             "rating": "Buy", "mean": 2.07, "analyst_count": 41,
             "distribution": { "strongBuy": 6, "buy": 22, "hold": 13,
@@ -501,34 +597,40 @@ instantly and survives restarts.
             "summary": "41 analysts · Buy (2.07/5) · target $324.01 (+4.18%)"
           }
         }
-      ]
-    },
-    "high": {
-      … ,
-      // Wishlist buys for this risk profile. Same shape as the profile above,
-      // but pre-filtered to genuine buys — an empty `suggestions` is the normal
-      // case and tells the UI to hide the section entirely.
+      ],
+      // Wishlist buys for this risk profile. Same shape, but `suggestions` is
+      // pre-filtered to genuine buys — an empty list is the normal case and
+      // tells the UI to hide the section. `candidates` keeps the unfiltered
+      // blend so a weight change can bring a name back.
       "wishlist": {
-        "portfolio_note": "…",
-        "models": ["gemini:gemini-3.6-flash", "groq:llama-3.3-70b-versatile"],
+        "portfolio_notes": [ … ],
+        "agents": [ … ],
         "avg_confidence": 72.5,
         "agreement": { "agreed": 1, "mixed": 0, "split": 0, "total": 1 },
+        "candidates": [ { "ticker": "DELL", "confidence": 72.5, … },
+                        { "ticker": "AMD",  "confidence": 48.0, … } ],
         "suggestions": [ { "ticker": "DELL", "confidence": 72.5,
                            "action": "buy", … } ]
       }
-    }
+    },
+    "high": { … }
   },
   "error": null
 }
 ```
 
-Each suggestion is `{ticker, confidence, action, confidence_label,
-horizon_months, headline, reasoning, price_trigger, risks, consensus, sources,
-wall_street}` where `confidence` is 0–100, `action` ∈ `buy | hold | trim | sell`
-(derived from the score), and `horizon_months` is 1–3. `sources` holds only the
-AI models; `wall_street` is unscored evidence. Suggestions saved before the switch to
-a quarterly view carry `horizon_days` instead; both backend and UI still read
-them.
+`POST /api/ai/weights` takes `{"weights": {...}}`, clamps each to 0-5, fills in
+any it wasn't given, persists them to the active portfolio, re-blends the cached
+scores, and returns **the same payload as `GET /api/ai`** — so the UI applies the
+result directly instead of polling. Weights that are all zero fall back to equal,
+since silencing every agent is never what someone means.
+
+**Backwards compatibility.** Suggestions saved before the five-agent split carry
+`kind: "model"` sources and a single top-level `reasoning`. There is nothing to
+reweight in those, so they are returned untouched rather than silently rescored
+against weights that never applied to them, and the UI still renders them the
+old way. Suggestions older still carry `horizon_days` instead of
+`horizon_months`; both backend and UI read them.
 
 > **Not financial advice.** Suggestions are generated by a model and can be
 > wrong — verify before you trade.
@@ -543,41 +645,50 @@ python3 run.py
 
 Then open http://127.0.0.1:8000 in your browser.
 
-**AI advisor (optional).** `AI_PROVIDER` is a comma-separated **priority list**;
-the first entry leads and supplies the prose, and the first two that actually
-have a key are used as the consensus pair. Anything without a key is skipped, so
-one key is enough to start.
+**AI advisor (optional).** `AI_PROVIDER` is a comma-separated list of **models**,
+not of opinions — the five agents are the opinions, and they are handed out
+round-robin across whatever has a key. Anything without a key is skipped, so one
+key is enough to start.
 
 ```bash
 AI_PROVIDER=gemini,groq,gemini-b     # the default
 ```
 
-With only a Gemini key that resolves to `gemini` + `gemini-b` — two *different*
-Gemini models cross-checking each other. Add `GROQ_API_KEY` and Groq slots in
-as the second opinion automatically, giving you two independent vendors.
+With only a Gemini key that resolves to `gemini` + `gemini-b`, two *different*
+Gemini models sharing the load; add `GROQ_API_KEY` and Groq slots in as a third,
+on a separate vendor's quota. More models buy **parallelism and quota headroom**
+rather than a second vote — and since an agent that runs dry costs you a whole
+dimension of the score, headroom is worth having. Up to five are used (one per
+agent); beyond that a model would sit idle.
 
-The **third** confidence source — the big financial firms' analyst consensus —
-needs no key or configuration at all; it comes from the same Yahoo session the
-price data already uses. To change how much each source counts toward the
-blended score, set `AI_SOURCE_WEIGHTS` (equal by default). Only the AI models
-carry weights — Wall Street is evidence inside their prompts, so how much it
-counts is now the models' judgement rather than a dial:
+Neither of the keyless evidence sources — the analyst consensus and the macro
+news tape — needs any configuration; they come from the same Yahoo session the
+price data uses and from Google News RSS.
+
+Agent weights are edited live in the UI and stored per portfolio. To set the
+default a *new* portfolio starts from, use `AI_AGENT_WEIGHTS`:
 
 ```bash
-AI_SOURCE_WEIGHTS="gemini:gemini-3.6-flash=2"    # lean on one model
+AI_AGENT_WEIGHTS="statistics=2,macro=0.5"   # keys: company_perspective,
+AI_AGENT_WEIGHTS="expert=0"                 # personal, statistics, expert, macro
 ```
 
-Sizing note: this app makes roughly **8 model calls and ~15k tokens a day**.
-Every free tier below clears that by orders of magnitude, so choose on accuracy,
-not quota.
+Sizing note: a refresh is up to **20 calls** (5 agents × 2 risk profiles ×
+holdings/wishlist), and it runs **once a trading day**, so that is roughly
+**20 calls and ~30k tokens a day** — arriving in one burst at the open. Each
+prompt carries one slice rather than the whole picture, so they are individually
+small, but the *call count* is what free tiers meter and a per-model daily cap of
+20 is exactly one refresh. **Configure two or three providers** so the
+round-robin has somewhere to go; one key alone cannot carry all five agents.
 
 *Provider 1 — Google Gemini API (default, free).* No credit card:
 
 ```bash
 # 1. Get a key: https://aistudio.google.com/app/apikey
 export GEMINI_API_KEY="AIza..."
-# Optional: GEMINI_MODEL   (default gemini-3.6-flash      — the lead)
-#           GEMINI_MODEL_B (default gemini-3.5-flash-lite — the second opinion)
+# Optional: GEMINI_MODEL   (default gemini-3.6-flash)
+#           GEMINI_MODEL_B (default gemini-3.5-flash-lite — a second model,
+#                           so the agents have two lanes on one key)
 python3 run.py
 ```
 
@@ -595,7 +706,7 @@ number written down here. Two things worth knowing:
 Optional: `GEMINI_API_BASE` (default `https://generativelanguage.googleapis.com/v1beta`).
 For OpenAI-compatible mode: `GEMINI_API_BASE=https://generativelanguage.googleapis.com/v1beta/openai`.
 
-*Provider 2 — Groq API (free, recommended second opinion).* Free key, no credit
+*Provider 2 — Groq API (free, recommended second lane).* Free key, no credit
 card. Note this is **Groq**, the inference provider running open-weight models —
 not xAI's **Grok**, which has no comparable free tier:
 
@@ -661,19 +772,23 @@ key):
 export FINNHUB_API_KEY=...
 ```
 
-Everything degrades gracefully: one model failing still leaves the other's
-answer (marked `single`, with the failure reported in `model_errors`); every
-model failing leaves the last good suggestions on screen; a news outage leaves
-the advisor running on price and history alone. Every client talks to its API
-over the standard library only — no SDK, matching the rest of the app.
+Everything degrades gracefully, one layer at a time: an agent whose model fails
+retries on another provider, then drops out with the remaining weights
+renormalised and the missing dimension named in the status line; every agent
+failing leaves the last good suggestions on screen; and losing an evidence
+source costs exactly the agents that read it — a ratings outage silences `WS`,
+a macro-feed outage silences `MA`, and the rest score on as normal. Every client
+talks to its API over the standard library only — no SDK, matching the rest of
+the app.
 
 Live prices, history, and earnings dates are fetched from Yahoo Finance, so an
 internet connection is needed for those. If the network (or Yahoo) is
 unavailable, the app still runs — live fields just show "—" until it recovers.
 
-Holdings, wishlist, sales log, and AI suggestions are stored locally, one set
-per portfolio, under `data/portfolios/<id>/` (`portfolio.json`, `wishlist.json`,
-`sales.json`, `ai_suggestions.json`) — separate tables. Which portfolios exist
+Holdings, wishlist, sales log, AI suggestions, and the agent weights are stored
+locally, one set per portfolio, under `data/portfolios/<id>/`
+(`portfolio.json`, `wishlist.json`, `sales.json`, `ai_suggestions.json`,
+`ai_weights.json`) — separate tables. Which portfolios exist
 and which one is active live in `data/portfolios/index.json`. Older single-
 portfolio installs (with the files directly under `data/`) are migrated into a
 first **"My Portfolio"** automatically on first launch, so no history is lost.
@@ -684,8 +799,8 @@ Keep several separate portfolios and switch between them from the dropdown at th
 top center of the page. Each is its own workspace — holdings, wishlist, sales,
 and AI suggestions never mix — and every action is saved immediately. The app
 remembers the portfolio you were last viewing and reopens on it. Each portfolio
-also remembers **its own AI-advisor risk toggle** (low / high), so switching
-portfolios restores that portfolio's setting.
+also remembers **its own AI-advisor risk toggle** (low / high) and **its own
+agent weights**, so switching portfolios restores both.
 
 | Method | Path                      | Purpose                                | Body            |
 | ------ | ------------------------- | -------------------------------------- | --------------- |

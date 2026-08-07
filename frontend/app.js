@@ -666,6 +666,12 @@ const aiWishlistDetailsList = document.getElementById("ai-wishlist-details-list"
 const aiBackBtn = document.getElementById("ai-back");
 const aiRefreshBtn = document.getElementById("ai-refresh");
 const riskToggleEl = document.getElementById("risk-toggle");
+const aiWeightsEl = document.getElementById("ai-weights");
+const aiWeightsListEl = document.getElementById("ai-weights-list");
+const aiWeightsTallyEl = document.getElementById("ai-weights-tally");
+const aiWeightsApplyBtn = document.getElementById("ai-weights-apply");
+const aiWeightsResetBtn = document.getElementById("ai-weights-reset");
+const aiWeightsMsg = document.getElementById("ai-weights-message");
 
 const DEFAULT_RISK = "low";
 
@@ -724,14 +730,18 @@ function renderAI() {
     b.classList.toggle("active", b.getAttribute("data-risk") === risk);
   });
 
-  // Status line + last-updated stamp.
+  // Status line + last-updated stamp. Now that suggestions regenerate once a
+  // day rather than every couple of hours, a lone timestamp reads as stale
+  // when it isn't — so say when the next one is due alongside it.
   setAiStatus();
   aiUpdatedEl.textContent = aiData.generated_at
-    ? `Updated ${fmtUpdated(aiData.generated_at)}`
+    ? `Updated ${fmtUpdated(aiData.generated_at)}` +
+      (aiData.next_refresh ? ` · next ${fmtUpdated(aiData.next_refresh)}` : "")
     : "—";
 
   const profile =
     (aiData.risk_profiles && aiData.risk_profiles[risk]) || null;
+  renderAgentWeights();
   renderAiSummary(profile);
   renderAiDetails(profile);
   renderAiWishlist(profile);
@@ -755,29 +765,28 @@ function setAiStatus() {
   } else if (!aiData.risk_profiles) {
     aiStatusEl.textContent = "No suggestions yet — hit Refresh to generate them.";
   } else {
-    // The models cross-check each other; say how many scored, how often they
-    // agreed, and note that Wall Street fed into their reasoning rather than
-    // being averaged in — so nobody reads the score as including a third vote.
+    // Say how many of the five agents actually scored, how often they landed
+    // in the same place, and where the average came out. A missing agent is
+    // worth flagging: it means a whole dimension is absent from the number.
     const profile = aiData.risk_profiles[getRisk()];
     const bits = [];
-    const modelCount = (profile && profile.models ? profile.models : []).length;
-    const configuredCount = (aiData.models || []).length;
-    if (modelCount > 1) {
+    const answered = agentsOf(profile).length;
+    const expected = (aiData.agents || []).length;
+    if (answered && expected && answered < expected) {
+      const missing = (aiData.agents || [])
+        .filter((a) => !agentsOf(profile).some((x) => x.key === a.key))
+        .map((a) => a.short)
+        .join(", ");
       bits.push(
-        `${modelCount} AI models` +
-          (aiData.analysts_configured ? " weighing Wall Street" : ""),
-      );
-    } else if (modelCount === 1 && configuredCount > 1) {
-      // A score from one model is not the consensus the panel is built on, and
-      // "N call(s) failed" buries that. Say it plainly instead.
-      bits.push(
-        `only 1 of ${configuredCount} models answered — no consensus, ` +
-          `scores are a single model's view`,
+        `only ${answered} of ${expected} agents scored — ` +
+          `no ${missing} view in these numbers`,
       );
       aiStatusEl.className = "ai-status warn";
+    } else if (answered) {
+      bits.push(`${answered} independent agents`);
     }
     const ag = profile && profile.agreement;
-    if (ag && ag.total && modelCount > 1) {
+    if (ag && ag.total && answered > 1) {
       bits.push(
         `${ag.agreed}/${ag.total} agreed` + (ag.split ? ` · ${ag.split} split` : ""),
       );
@@ -786,7 +795,7 @@ function setAiStatus() {
       bits.push(`avg score ${Math.round(profile.avg_confidence)}`);
     }
     if (aiData.model_errors && aiData.model_errors.length) {
-      bits.push(`${aiData.model_errors.length} model call(s) failed`);
+      bits.push(`${aiData.model_errors.length} agent call(s) failed`);
       aiStatusEl.className = "ai-status warn";
     }
     aiStatusEl.textContent = bits.join(" — ");
@@ -796,10 +805,28 @@ function setAiStatus() {
 
 // --- Confidence score display ------------------------------------------
 //
-// Each holding carries one 0-100 score blended from three sources (the two AI
-// models and the Wall Street analyst consensus). 100 = strong buy, 50 = hold,
+// Each stock carries one 0-100 score: the weighted average of the five agents,
+// each of which worked alone on its own evidence. 100 = strong buy, 50 = hold,
 // 0 = strong sell, so the number IS the call and the action badge just names
 // the band it falls in.
+
+// The agents that scored this profile, in roster order. Falls back to the
+// advisor-level roster so the weight controls still render before the first
+// generation, and to [] for suggestions saved before the five-agent split.
+function agentsOf(profile) {
+  if (profile && profile.agents) return profile.agents;
+  return [];
+}
+
+// The agent roster the backend reports, for the weight controls and for
+// labelling per-agent chips even when an agent didn't answer.
+function agentRoster() {
+  return (aiData && aiData.agents) || [];
+}
+
+function agentMeta(key) {
+  return agentRoster().find((a) => a.key === key) || null;
+}
 
 // The score of a suggestion, or null for suggestions saved before scoring
 // existed (the panel still renders those from their action alone).
@@ -838,51 +865,68 @@ function bandLabel(s) {
   return { cls: a.cls, text: s.confidence_label || a.label };
 }
 
-// The numbers behind the average — one per AI model, rendered smaller than the
-// blended score they average out to. Slots are keyed to the profile's model
-// list rather than to the order sources happen to arrive in, so each position
-// always means the same model; a model with no score for this ticker shows an
-// em dash rather than shifting the others along.
+// The five numbers behind the average, rendered smaller than the blended score
+// they produce. Slots are keyed to the agent roster rather than to the order
+// sources happen to arrive in, so each position always means the same agent and
+// a reader learns where to look; an agent with no score for this ticker shows
+// an em dash rather than shifting the others along.
 //
-// Wall Street is deliberately absent here: it no longer scores anything. Both
-// models read the street's research as evidence and it is folded into their
-// own numbers, so a separate WS figure would imply a vote that isn't cast.
-// The detail card shows what they were shown, under "What Wall Street says".
-function miniScores(s, modelLabels) {
+// A zero-weighted agent is dimmed rather than hidden — it still has a view, it
+// just isn't counted right now, and hiding it would make the average look like
+// it was reached by fewer opinions than were actually gathered.
+function miniScores(s, agents) {
   const sources = s.sources || [];
   if (!sources.length) return "";
 
-  const slots = (modelLabels || []).map((label) => ({
-    tag: "AI",
-    name: label,
-    src: sources.find((v) => v.kind === "model" && v.name === label) || null,
-  }));
-  // Any model that answered but isn't in the profile list — never expected,
-  // but better shown than silently dropped.
-  sources
-    .filter((v) => v.kind === "model" && !(modelLabels || []).includes(v.name))
-    .forEach((v) => slots.push({ tag: "AI", name: v.name, src: v }));
-  if (!slots.length) return "";
+  // Old saved data scored by models, not agents — render it as it was.
+  if (!sources.some((v) => v.kind === "agent")) {
+    return legacyMiniScores(sources);
+  }
 
-  const cells = slots
-    .map((slot) => {
-      if (!slot.src) {
-        return `<span class="ai-mini" title="${escapeHtml(
-          slot.name
-        )} — no score">
-          <span class="ai-mini-tag">${slot.tag}</span>
+  const order = (agents && agents.length ? agents : agentRoster()).map((a) => a.key);
+  const keys = order.length ? order : sources.map((v) => v.key);
+  const cells = keys
+    .map((key) => {
+      const meta = agentMeta(key) || {};
+      const src = sources.find((v) => v.key === key) || null;
+      const short = escapeHtml((src && src.short) || meta.short || "??");
+      const name = escapeHtml((src && src.name) || meta.name || key);
+      if (!src) {
+        return `<span class="ai-mini" title="${name} — no score for this stock">
+          <span class="ai-mini-tag">${short}</span>
           <span class="ai-mini-val">—</span></span>`;
       }
-      const cls = (AI_ACTIONS[slot.src.action] || AI_ACTIONS.hold).cls;
-      return `<span class="ai-mini" title="${escapeHtml(slot.src.name)} — ${
-        Math.round(slot.src.confidence)
-      }/100${slot.src.label ? ` (${escapeHtml(slot.src.label)})` : ""}">
-        <span class="ai-mini-tag">${slot.tag}</span>
-        <span class="ai-mini-val ${cls}">${Math.round(slot.src.confidence)}</span>
+      const cls = (AI_ACTIONS[src.action] || AI_ACTIONS.hold).cls;
+      const muted = !src.weight ? " muted" : "";
+      const weightNote = src.weight
+        ? `weight ×${fmtWeight(src.weight)}`
+        : "weight 0 — not counted";
+      return `<span class="ai-mini${muted}" title="${name} — ${Math.round(
+        src.confidence
+      )}/100${src.label ? ` (${escapeHtml(src.label)})` : ""} · ${weightNote}">
+        <span class="ai-mini-tag">${short}</span>
+        <span class="ai-mini-val ${cls}">${Math.round(src.confidence)}</span>
       </span>`;
     })
     .join("");
   return `<span class="ai-minis">${cells}</span>`;
+}
+
+// Suggestions generated before the five-agent split carry one source per model.
+function legacyMiniScores(sources) {
+  const cells = sources
+    .filter((v) => v.kind === "model")
+    .map((v) => {
+      const cls = (AI_ACTIONS[v.action] || AI_ACTIONS.hold).cls;
+      return `<span class="ai-mini" title="${escapeHtml(v.name)} — ${Math.round(
+        v.confidence
+      )}/100">
+        <span class="ai-mini-tag">AI</span>
+        <span class="ai-mini-val ${cls}">${Math.round(v.confidence)}</span>
+      </span>`;
+    })
+    .join("");
+  return cells ? `<span class="ai-minis">${cells}</span>` : "";
 }
 
 // One summary bullet — shared by the holdings list and the wishlist so both
@@ -892,12 +936,20 @@ function miniScores(s, modelLabels) {
 // jumble and push the button somewhere unpredictable.
 //
 // ``kind`` tags the row so the details view knows which list to filter.
-function summaryRow(s, models, kind) {
+function summaryRow(s, agents, kind) {
   const band = bandLabel(s);
   const ticker = escapeHtml(s.ticker);
-  const sub = [miniScores(s, models), `<span class="ai-horizon">${fmtHorizon(s)}</span>`]
+  const sub = [miniScores(s, agents), `<span class="ai-horizon">${fmtHorizon(s)}</span>`]
     .filter(Boolean)
     .join("");
+  // The one-liner comes from whichever agent moved the score most, so say
+  // which one — an unattributed headline reads as a consensus view, and this
+  // deliberately isn't one.
+  const from = s.headline_from ? agentMeta(s.headline_from) : null;
+  const attribution = from
+    ? ` <span class="ai-from" title="${escapeHtml(from.name)} — the agent that
+ moved this score the most">${escapeHtml(from.short)}</span>`
+    : "";
   return `<li>
     <div class="ai-row-top">
       <span class="ai-ticker">${ticker}</span>
@@ -908,7 +960,11 @@ function summaryRow(s, models, kind) {
     </div>
     <div class="ai-row-sub">${sub}</div>
     ${scoreMeter(scoreOf(s), s.action)}
-    ${s.headline ? `<span class="ai-line">${escapeHtml(s.headline)}</span>` : ""}
+    ${
+      s.headline
+        ? `<span class="ai-line">${escapeHtml(s.headline)}${attribution}</span>`
+        : ""
+    }
     ${
       kind === "wishlist" && s.price_trigger
         ? `<span class="ai-line trigger">↳ ${escapeHtml(s.price_trigger)}</span>`
@@ -917,20 +973,44 @@ function summaryRow(s, models, kind) {
   </li>`;
 }
 
+// The per-agent notes on the list as a whole. Kept as five short paragraphs
+// rather than merged into one: they were written from five different bodies of
+// evidence, and stitching them together would imply a synthesis nobody did.
+function renderNotes(container, profile) {
+  if (!container) return;
+  const notes = (profile && profile.portfolio_notes) || [];
+  if (!notes.length) {
+    // Older saved data had a single blended note.
+    const legacy = profile && profile.portfolio_note;
+    container.innerHTML = legacy
+      ? `<p class="ai-note">${escapeHtml(legacy)}</p>`
+      : "";
+    return;
+  }
+  container.innerHTML = notes
+    .map(
+      (n) => `<p class="ai-note">
+        <span class="ai-note-tag" title="${escapeHtml(n.name)}">${escapeHtml(
+        n.short
+      )}</span>${escapeHtml(n.note)}</p>`
+    )
+    .join("");
+}
+
 // Summary: bullet per stock — ticker, the blended score, the band it falls in,
 // the source scores behind it, horizon, meter.
 function renderAiSummary(profile) {
   const suggestions = (profile && profile.suggestions) || [];
   if (!suggestions.length) {
     aiSummaryList.innerHTML = `<li class="ai-empty">No suggestions yet.</li>`;
-    aiPortfolioNote.textContent = "";
+    aiPortfolioNote.innerHTML = "";
     return;
   }
-  const models = (profile && profile.models) || [];
+  const agents = agentsOf(profile);
   aiSummaryList.innerHTML = suggestions
-    .map((s) => summaryRow(s, models, "holdings"))
+    .map((s) => summaryRow(s, agents, "holdings"))
     .join("");
-  aiPortfolioNote.textContent = (profile && profile.portfolio_note) || "";
+  renderNotes(aiPortfolioNote, profile);
 }
 
 // Wishlist buys (minimized): only rendered when the AI flags a real buy.
@@ -944,15 +1024,15 @@ function renderAiWishlist(profile) {
   if (!suggestions.length) {
     aiWishlistSection.hidden = true;
     aiWishlistList.innerHTML = "";
-    if (aiWishlistNote) aiWishlistNote.textContent = "";
+    if (aiWishlistNote) aiWishlistNote.innerHTML = "";
     return;
   }
-  const models = (wl && wl.models) || (profile && profile.models) || [];
+  const agents = agentsOf(wl).length ? agentsOf(wl) : agentsOf(profile);
   aiWishlistSection.hidden = false;
   aiWishlistList.innerHTML = suggestions
-    .map((s) => summaryRow(s, models, "wishlist"))
+    .map((s) => summaryRow(s, agents, "wishlist"))
     .join("");
-  if (aiWishlistNote) aiWishlistNote.textContent = (wl && wl.portfolio_note) || "";
+  renderNotes(aiWishlistNote, wl);
 }
 
 // The firms behind an analyst score — who upgraded, downgraded, or reiterated.
@@ -977,41 +1057,74 @@ function firmsBlock(source) {
   return `<ul class="ai-firms">${rows}</ul>`;
 }
 
-// The breakdown behind the blended score: each AI model, its own score, and how
-// much weight it carried. Models only — the street doesn't score.
+// The whole argument behind the blended score: each agent's number, the weight
+// it carried, and the case it actually made.
+//
+// This is the part of the UI the five-agent split exists for. One model writing
+// one paragraph hides which evidence drove the verdict; five short arguments,
+// each labelled with the dimension it came from, let you see that (say) the
+// numbers hate a stock the street loves — and then move a slider about it.
 function sourcesBlock(s) {
   const sources = (s.sources || []).filter((v) => v.kind !== "analyst");
   if (!sources.length) return "";
-  const rows = sources
+  const agentSources = sources.filter((v) => v.kind === "agent");
+  const rows = (agentSources.length ? agentSources : sources)
     .map((v) => {
       const cls = (AI_ACTIONS[v.action] || AI_ACTIONS.hold).cls;
-      return `<li class="ai-source model">
-        <span class="ai-src-name">${escapeHtml(v.name)}</span>
-        <span class="ai-score sm ${cls}">${Math.round(v.confidence)}</span>
-        <span class="ai-src-weight" title="Weight in the blended score">×${fmtWeight(
-          v.weight
-        )}</span>
+      const counted = v.weight > 0;
+      const trigger = v.price_trigger
+        ? `<p class="ai-src-trigger">↳ ${escapeHtml(v.price_trigger)}</p>`
+        : "";
+      const risk = v.risks
+        ? `<p class="ai-src-risk">Risk: ${escapeHtml(v.risks)}</p>`
+        : "";
+      return `<li class="ai-source agent${counted ? "" : " muted"}">
+        <div class="ai-src-head">
+          <span class="ai-src-tag" title="${escapeHtml(v.focus || "")}">${escapeHtml(
+        v.short || "?"
+      )}</span>
+          <span class="ai-src-name">${escapeHtml(v.name || v.key || "")}</span>
+          <span class="ai-score sm ${cls}">${Math.round(v.confidence)}</span>
+          <span class="ai-src-weight" title="${
+            counted
+              ? "Weight in the blended score"
+              : "Weight 0 — this agent's view is not counted"
+          }">×${fmtWeight(v.weight)}</span>
+        </div>
         ${scoreMeter(v.confidence, v.action)}
-        ${v.detail ? `<span class="ai-line">${escapeHtml(v.detail)}</span>` : ""}
+        ${v.detail ? `<p class="ai-src-headline">${escapeHtml(v.detail)}</p>` : ""}
+        ${v.reasoning ? `<p class="ai-src-reason">${escapeHtml(v.reasoning)}</p>` : ""}
+        ${trigger}
+        ${risk}
+        ${
+          v.model
+            ? `<span class="ai-src-model" title="Which model ran this agent —
+ capacity, not opinion">${escapeHtml(v.model)}</span>`
+            : ""
+        }
       </li>`;
     })
     .join("");
   const score = scoreOf(s);
+  const counted = (agentSources.length ? agentSources : sources).filter(
+    (v) => v.weight > 0
+  ).length;
   const heading =
     score == null
-      ? "Sources"
-      : `Confidence ${Math.round(score)}/100 · ${sources.length} AI model${
-          sources.length === 1 ? "" : "s"
-        }`;
-  return `<span class="ai-field-label">${escapeHtml(heading)}</span>
+      ? "The agents"
+      : `Confidence ${Math.round(score)}/100 · weighted average of ${counted} ` +
+        `agent${counted === 1 ? "" : "s"}`;
+  return `<span class="ai-field-label">${escapeHtml(heading)}
+    <span class="ai-evidence-tag" title="Each agent worked alone on its own
+ evidence and never saw the others' answers">independent</span></span>
           <ul class="ai-sources">${rows}</ul>`;
 }
 
-// What Wall Street says — shown as evidence, not as a vote. This is the same
-// research both models read before scoring, so it explains where their numbers
-// came from without pretending to be a number of its own. Falls back to the
-// legacy analyst *source* on suggestions saved when the street was still
-// scored, so old data still renders.
+// What Wall Street says — the raw research, shown because it is exactly what
+// the expert agent (WS) read and nothing else did. It explains where that one
+// agent's number came from without pretending to be a number of its own. Falls
+// back to the legacy analyst *source* on suggestions saved when the street was
+// still scored directly, so old data still renders.
 function streetBlock(s) {
   const w =
     s.wall_street ||
@@ -1048,8 +1161,8 @@ function streetBlock(s) {
     .join(" · ");
 
   return `<span class="ai-field-label">What Wall Street says
-    <span class="ai-evidence-tag" title="Both models read this before scoring —
- it is evidence they weighed, not a score of its own">evidence</span></span>
+    <span class="ai-evidence-tag" title="The only evidence the WS agent read.
+ No other agent saw it.">WS agent's evidence</span></span>
     <div class="ai-street">
       ${head ? `<p class="ai-street-head">${head}</p>` : ""}
       ${counts.length ? `<p class="ai-street-line">${counts.join(" · ")}</p>` : ""}
@@ -1063,17 +1176,37 @@ function streetBlock(s) {
     </div>`;
 }
 
-// One detail card — the ~10-line reasoning, trigger, and risks. Shared by both
-// lists; a wishlist card is about getting in rather than staying in, so it
-// renames the trigger and carries a badge.
+// How far apart the five landed, in one line. A split is not a defect to be
+// smoothed over — it is the most useful thing this panel can tell you, so it
+// gets said out loud rather than left implicit in the numbers.
+const AI_CONSENSUS = {
+  agree: { text: "the agents broadly agree", cls: "agree" },
+  mixed: { text: "the agents are mixed", cls: "mixed" },
+  split: { text: "the agents are split — read all five", cls: "split" },
+  single: { text: "only one agent scored this", cls: "single" },
+};
+
+function consensusBadge(s) {
+  const c = AI_CONSENSUS[s.consensus];
+  if (!c) return "";
+  return `<span class="ai-consensus ${c.cls}">${escapeHtml(c.text)}</span>`;
+}
+
+// One detail card. The body is the five agents' own arguments rather than a
+// single blended paragraph: nobody wrote one, because no agent saw enough to.
+// Suggestions saved before the split still carry a top-level reasoning, so that
+// is rendered when it's there.
 function detailCard(s, kind) {
   const band = bandLabel(s);
   const wishlist = kind === "wishlist";
-  const trigger = s.price_trigger
+  const legacyReason = s.reasoning
+    ? `<p class="ai-reason">${escapeHtml(s.reasoning)}</p>`
+    : "";
+  const legacyTrigger = s.price_trigger
     ? `<span class="ai-field-label">${wishlist ? "Entry" : "Price"} trigger</span>
        <p class="ai-trigger">${escapeHtml(s.price_trigger)}</p>`
     : "";
-  const risks = s.risks
+  const legacyRisks = s.risks
     ? `<span class="ai-field-label">Main risk</span>
        <p>${escapeHtml(s.risks)}</p>`
     : "";
@@ -1086,9 +1219,10 @@ function detailCard(s, kind) {
       ${wishlist ? `<span class="ai-wishlist-badge">wishlist</span>` : ""}
     </div>
     ${scoreMeter(scoreOf(s), s.action)}
-    <p class="ai-reason">${escapeHtml(s.reasoning)}</p>
-    ${trigger}
-    ${risks}
+    ${consensusBadge(s)}
+    ${legacyReason}
+    ${legacyTrigger}
+    ${legacyRisks}
     ${sourcesBlock(s)}
     ${streetBlock(s)}
   </div>`;
@@ -1171,6 +1305,149 @@ function fmtUpdated(iso) {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+  });
+}
+
+// --- Agent weights ------------------------------------------------------
+//
+// How much each of the five agents counts toward the average. Applying posts
+// them and the server re-blends the scores it already has — no model runs, so
+// this comes back instantly and costs nothing. That is what makes the sliders
+// worth having: you can ask "what if I didn't care what Wall Street thinks?"
+// and see the whole panel resettle.
+
+const WEIGHT_MAX = 5;
+const WEIGHT_STEP = 0.25;
+
+// Slider positions live here while the panel is open, so a re-render (the
+// 2-minute poll, say) doesn't yank a half-adjusted slider back.
+let weightDraft = null;
+
+function currentWeights() {
+  return (aiData && aiData.agent_weights) || {};
+}
+
+function renderAgentWeights() {
+  if (!aiWeightsListEl) return;
+  const roster = agentRoster();
+  if (!roster.length) {
+    aiWeightsEl.hidden = true;
+    return;
+  }
+  aiWeightsEl.hidden = false;
+  const weights = weightDraft || currentWeights();
+
+  // Don't rebuild the sliders under someone's cursor. renderAI() runs on a
+  // timer, and replacing the markup mid-drag would drop the drag and lose the
+  // unapplied edit; the draft is already on screen and still correct.
+  if (weightDraft && aiWeightsEl.open) {
+    renderWeightTally(weights);
+    return;
+  }
+
+  aiWeightsListEl.innerHTML = roster
+    .map((a) => {
+      const w = weights[a.key] != null ? weights[a.key] : 1;
+      return `<div class="ai-weight-row${w > 0 ? "" : " off"}" data-key="${escapeHtml(
+        a.key
+      )}">
+        <span class="ai-weight-tag" title="${escapeHtml(a.focus)}">${escapeHtml(
+        a.short
+      )}</span>
+        <label class="ai-weight-name" for="w-${escapeHtml(a.key)}"
+          title="${escapeHtml(a.focus)}">${escapeHtml(a.name)}</label>
+        <input id="w-${escapeHtml(a.key)}" class="ai-weight-slider" type="range"
+          min="0" max="${WEIGHT_MAX}" step="${WEIGHT_STEP}" value="${w}"
+          data-key="${escapeHtml(a.key)}"
+          aria-label="${escapeHtml(a.name)} weight" />
+        <output class="ai-weight-val">${w > 0 ? "×" + fmtWeight(w) : "off"}</output>
+      </div>`;
+    })
+    .join("");
+
+  renderWeightTally(weights);
+}
+
+// The summary line shows the share of the score each agent carries, which is
+// the number that actually matters — a weight of 2 means nothing until you know
+// what the others are.
+function renderWeightTally(weights) {
+  if (!aiWeightsTallyEl) return;
+  const roster = agentRoster();
+  const total = roster.reduce((sum, a) => sum + (weights[a.key] || 0), 0);
+  const off = roster.filter((a) => !(weights[a.key] > 0));
+  if (!total) {
+    aiWeightsTallyEl.textContent = "";
+    return;
+  }
+  const equal = roster.every(
+    (a) => (weights[a.key] || 0) === (weights[roster[0].key] || 0)
+  );
+  aiWeightsTallyEl.textContent = equal
+    ? `equal — ${Math.round(100 / roster.length)}% each`
+    : roster
+        .filter((a) => weights[a.key] > 0)
+        .map((a) => `${a.short} ${Math.round((weights[a.key] / total) * 100)}%`)
+        .join(" · ") + (off.length ? ` · ${off.length} off` : "");
+}
+
+function readWeightDraft() {
+  const out = {};
+  aiWeightsListEl.querySelectorAll("[data-key].ai-weight-slider").forEach((el) => {
+    out[el.getAttribute("data-key")] = parseFloat(el.value);
+  });
+  return out;
+}
+
+if (aiWeightsListEl) {
+  aiWeightsListEl.addEventListener("input", (e) => {
+    const slider = e.target.closest(".ai-weight-slider");
+    if (!slider) return;
+    weightDraft = readWeightDraft();
+    const row = slider.closest(".ai-weight-row");
+    const value = parseFloat(slider.value);
+    row.classList.toggle("off", !(value > 0));
+    const out = row.querySelector(".ai-weight-val");
+    if (out) out.textContent = value > 0 ? "×" + fmtWeight(value) : "off";
+    renderWeightTally(weightDraft);
+    setMessage(aiWeightsMsg, "Not applied yet.", "");
+  });
+}
+
+async function applyWeights(weights) {
+  try {
+    const res = await fetch(`${AI_API}/weights`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ weights }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setMessage(aiWeightsMsg, data.error || "Could not apply weights.", "err");
+      return;
+    }
+    weightDraft = null;
+    aiData = data;
+    renderAI();
+    setMessage(aiWeightsMsg, "Applied — scores re-blended.", "ok");
+  } catch {
+    setMessage(aiWeightsMsg, "Could not reach the AI API.", "err");
+  }
+}
+
+if (aiWeightsApplyBtn) {
+  aiWeightsApplyBtn.addEventListener("click", () =>
+    applyWeights(weightDraft || currentWeights())
+  );
+}
+if (aiWeightsResetBtn) {
+  aiWeightsResetBtn.addEventListener("click", () => {
+    const defaults =
+      (aiData && aiData.default_agent_weights) ||
+      Object.fromEntries(agentRoster().map((a) => [a.key, 1]));
+    weightDraft = { ...defaults };
+    renderAgentWeights();
+    applyWeights(defaults);
   });
 }
 
@@ -1260,7 +1537,8 @@ function stopAiPoll() {
   }
 }
 
-// Pick up scheduled (every-2h) refreshes without a reload.
+// Pick up the daily opening-bell refresh without a reload — and keep the
+// "next refresh" stamp honest as the day rolls over.
 setInterval(loadAI, 120000);
 
 // --- Portfolios (switch / create / rename / delete) -------------------
@@ -1321,6 +1599,10 @@ function activePortfolio() {
 // portfolio's suggestions start at the summary.
 function reloadAllPanels() {
   aiDetailFilter = null;
+  // Agent weights are per-portfolio, so an unapplied draft belongs to the
+  // portfolio being left behind.
+  weightDraft = null;
+  setMessage(aiWeightsMsg, "", "");
   if (aiDetailsView) aiDetailsView.hidden = true;
   if (aiSummaryView) aiSummaryView.hidden = false;
   loadSummary();

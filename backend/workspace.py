@@ -20,6 +20,7 @@ On-disk layout (all under ``data/``)::
           wishlist.json
           sales.json
           ai_suggestions.json
+          ai_weights.json         # how much each AI agent counts
         _archive/                 # deleted portfolios are moved here, never erased
 
 The active portfolio id is persisted in ``index.json``, so restarting the app
@@ -37,7 +38,19 @@ from backend.storage import JSONStorage, StorageBackend
 
 # The per-portfolio data files. Migrating legacy top-level data moves exactly
 # these; creating a portfolio lazily creates them on first write.
-DATA_FILES = ("portfolio.json", "wishlist.json", "sales.json", "ai_suggestions.json")
+#
+# ``ai_weights.json`` holds how much each of the five AI agents counts toward
+# that portfolio's blended score. It is per-portfolio for the same reason the
+# risk toggle is: a speculative watchlist and a retirement account deserve to
+# weigh the macro agent differently, and a weight set on one shouldn't quietly
+# follow you to the other.
+DATA_FILES = (
+    "portfolio.json",
+    "wishlist.json",
+    "sales.json",
+    "ai_suggestions.json",
+    "ai_weights.json",
+)
 
 # Each portfolio remembers its own AI-advisor risk toggle (which risk profile the
 # UI shows). Stored on the portfolio's registry entry so it's part of the same

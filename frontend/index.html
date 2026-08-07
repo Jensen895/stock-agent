@@ -193,20 +193,18 @@
 
     </div><!-- /.main-col -->
 
-    <!-- AI ADVISOR (read only) — the agent's one-to-three-month outlook. -->
+    <!-- AI ADVISOR (read only) — five agents' one-to-three-month outlook. -->
     <aside class="ai-col">
       <section class="card ai-card">
+        <!-- No description paragraph here on purpose: this column is narrow and
+             the calls are what it's for, so prose above them cost more screen
+             than it earned. The explanation lives on the heading's tooltip, and
+             every agent tag carries its own, so nothing became undiscoverable —
+             it just stopped taking up room. -->
         <div class="ai-head">
-          <h2>🤖 AI Advisor</h2>
+          <h2 title="One confidence score per stock for the next one to three months — the weighted average of five independent agents (CO company · ME your position & price history · ST raw statistics · WS Wall Street · MA macro & policy). Each works alone on its own evidence and never sees the others' answers, so where they disagree is the interesting part. Refreshes once a day at the opening bell.">🤖 AI Advisor</h2>
           <button id="ai-refresh" class="secondary" type="button">Refresh</button>
         </div>
-        <p class="hint">A confidence score per holding for the next one to
-          three months, averaged from two AI models. Each reads your holdings,
-          momentum, company fundamentals, the news, <em>and</em> what Wall
-          Street says — the consensus rating, how far the analysts disagree,
-          and who upgraded or downgraded — then reaches its own number. The
-          firms don't get a vote; the models weigh them. Refreshes every 2h
-          during market hours.</p>
 
         <div class="ai-controls">
           <div id="risk-toggle" class="risk-toggle" role="group"
@@ -216,6 +214,22 @@
           </div>
           <span id="ai-updated" class="ai-updated">—</span>
         </div>
+
+        <!-- AGENT WEIGHTS — how much each agent counts toward the average.
+             Applying re-blends the scores already on screen; no model is
+             called, so it's instant and costs nothing. -->
+        <details id="ai-weights" class="ai-weights">
+          <summary class="ai-weights-summary"
+            title="How much each agent counts toward the average. Set one to 0 to ignore it entirely. Re-blends instantly — no new AI call.">⚖️ Agent weights
+            <span id="ai-weights-tally" class="ai-weights-tally"></span>
+          </summary>
+          <div id="ai-weights-list" class="ai-weights-list"></div>
+          <div class="ai-weights-actions">
+            <button id="ai-weights-apply" type="button">Apply</button>
+            <button id="ai-weights-reset" class="secondary" type="button">Reset</button>
+            <span id="ai-weights-message" class="message" role="status"></span>
+          </div>
+        </details>
 
         <p id="ai-status" class="ai-status" role="status"></p>
 
@@ -241,14 +255,17 @@
           <ul id="ai-summary-list" class="ai-summary">
             <li class="ai-empty">No suggestions yet.</li>
           </ul>
-          <p id="ai-portfolio-note" class="ai-note"></p>
+
+          <!-- One note per agent on the list as a whole, kept separate rather
+               than merged: they were written from different evidence. -->
+          <div id="ai-portfolio-note" class="ai-notes"></div>
 
           <!-- WISHLIST BUYS (minimized): only when AI flags a good entry. -->
           <div id="ai-wishlist-section" hidden>
             <div class="ai-divider"></div>
             <span class="ai-subtitle">⭐ Wishlist — good entries now</span>
             <ul id="ai-wishlist-list" class="ai-summary"></ul>
-            <p id="ai-wishlist-note" class="ai-note"></p>
+            <div id="ai-wishlist-note" class="ai-notes"></div>
           </div>
         </div>
 

@@ -706,9 +706,10 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 .ai-legend-end.neg { color: var(--err); }
 .ai-legend-mid { color: var(--muted); }
 
-/* The three numbers behind the average: AI model A, AI model B, Wall Street.
+/* The five numbers behind the average, one per agent (CO / ME / ST / WS / MA).
    Deliberately smaller and quieter than the blended score — they explain where
-   it came from rather than competing with it. */
+   it came from rather than competing with it. Positions are fixed to the agent
+   roster, so the same slot always means the same agent. */
 .ai-minis {
   display: inline-flex;
   align-items: center;
@@ -740,9 +741,28 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 .ai-mini-val.hold { color: var(--muted); }
 .ai-mini-val.trim { color: #fbbf24; }
 .ai-mini-val.sell { color: var(--err); }
+/* A zero-weighted agent still has a view; it just isn't being counted. Dim it
+   rather than hiding it, so the row doesn't imply fewer opinions than exist. */
+.ai-mini.muted { opacity: 0.35; }
+.ai-mini.muted .ai-mini-val { text-decoration: line-through; }
 
-/* Per-source breakdown inside a detail card: each AI model and the street,
-   with the score it contributed and the weight it carried. */
+/* Which agent's headline the summary line came from. */
+.ai-from {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  vertical-align: middle;
+}
+
+/* Per-agent breakdown inside a detail card: each agent's score, the weight it
+   carried, and the case it made. This is the heart of the panel — five short
+   arguments from five separate bodies of evidence, not one blended paragraph. */
 .ai-sources {
   list-style: none;
   margin: 0.35rem 0 0;
@@ -784,6 +804,85 @@ td.earnings { color: var(--muted); white-space: nowrap; }
   line-height: 1.45;
   font-size: 0.75rem;
 }
+
+/* An agent's block: header row, meter, then its own argument. */
+.ai-source.agent {
+  display: block;
+  border-left-color: var(--accent);
+  padding-left: 0.6rem;
+}
+.ai-source.agent.muted { opacity: 0.45; border-left-color: var(--border); }
+.ai-src-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.ai-src-tag {
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+.ai-source.agent.muted .ai-src-tag { color: var(--muted); }
+.ai-source.agent .ai-src-name {
+  flex: 1;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.ai-src-headline {
+  margin: 0.3rem 0 0 !important;
+  font-size: 0.78rem !important;
+  color: var(--text);
+}
+.ai-src-reason {
+  margin: 0.25rem 0 0 !important;
+  font-size: 0.75rem !important;
+  color: var(--muted);
+  line-height: 1.5;
+  white-space: pre-line;
+}
+.ai-src-trigger {
+  margin: 0.3rem 0 0 !important;
+  font-size: 0.73rem !important;
+  color: var(--accent);
+}
+.ai-src-risk {
+  margin: 0.2rem 0 0 !important;
+  font-size: 0.72rem !important;
+  color: var(--muted);
+  font-style: italic;
+}
+/* Which model ran this agent — a footnote, not a finding. */
+.ai-src-model {
+  display: inline-block;
+  margin-top: 0.3rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.6rem;
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+/* How far apart the five landed. A split is information, so it is stated
+   rather than left for the reader to infer from the chips. */
+.ai-consensus {
+  display: inline-block;
+  margin-top: 0.45rem;
+  padding: 0.08rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.ai-consensus.agree { color: var(--ok); border-color: rgba(74, 222, 128, 0.4); }
+.ai-consensus.mixed { color: #fbbf24; border-color: rgba(251, 191, 36, 0.4); }
+.ai-consensus.split { color: var(--err); border-color: rgba(248, 113, 113, 0.45); }
 
 /* What Wall Street says — evidence the models weighed, not a score. Set apart
    from the scoring sources above it so the distinction is visible at a glance. */
@@ -851,12 +950,107 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 .ai-firms .ai-firm-grade { flex: 1; }
 .ai-firms .ai-firm-date { font-variant-numeric: tabular-nums; opacity: 0.75; }
 
+/* One note per agent on the whole list, each tagged with who wrote it. */
+.ai-notes { margin-top: 0.9rem; }
 .ai-note {
-  margin: 0.9rem 0 0;
-  font-size: 0.82rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
   color: var(--muted);
   line-height: 1.5;
 }
+.ai-note-tag {
+  display: inline-block;
+  margin-right: 0.35rem;
+  padding: 0 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  vertical-align: middle;
+}
+
+/* AGENT WEIGHTS — how much each agent counts. Collapsed by default: it is a
+   control, not a reading, and the panel above it is what people came for. */
+.ai-weights {
+  margin: 0 0 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  background: rgba(148, 163, 184, 0.04);
+}
+.ai-weights-summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.ai-weights-summary::-webkit-details-marker { display: none; }
+.ai-weights-summary::before { content: "▸"; color: var(--muted); font-size: 0.7rem; }
+.ai-weights[open] .ai-weights-summary::before { content: "▾"; }
+.ai-weights-tally {
+  font-weight: 400;
+  font-size: 0.68rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* The explanatory line that used to sit here is on the summary's tooltip now —
+   the sliders are self-describing once open, and the prose only pushed them
+   further down a column that is short on room. */
+.ai-weights-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+.ai-weight-row {
+  display: grid;
+  grid-template-columns: auto 1fr 5.5rem auto;
+  align-items: center;
+  gap: 0.4rem;
+}
+.ai-weight-row.off { opacity: 0.5; }
+.ai-weight-tag {
+  padding: 0.05rem 0.28rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+.ai-weight-row.off .ai-weight-tag { color: var(--muted); }
+.ai-weight-name {
+  font-size: 0.73rem;
+  color: var(--text);
+  cursor: help;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-weight-slider { width: 100%; accent-color: var(--accent); cursor: pointer; }
+.ai-weight-val {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 2.2rem;
+  text-align: right;
+}
+.ai-weights-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+}
+.ai-weights-actions button { padding: 0.3rem 0.7rem; font-size: 0.75rem; }
+.ai-weights-actions .message { margin: 0; font-size: 0.7rem; }
 
 .ai-back { margin-bottom: 0.5rem; padding-left: 0; }
 

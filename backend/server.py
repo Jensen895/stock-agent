@@ -21,8 +21,14 @@ Endpoints:
   GET    /api/summary       -> dashboard totals               (read only)
                                total worth + realized + unrealized gains
   GET    /api/ai            -> latest AI suggestions           (read only)
-                               summary + per-stock detail, low & high risk
+                               summary + per-stock detail, low & high risk,
+                               each score broken down by the five agents
   POST   /api/ai/refresh    -> trigger a background regeneration of suggestions
+  POST   /api/ai/weights    -> set how much each AI agent counts     (write)
+                               body: {"weights": {"<agent key>": number, ...}}
+                               Re-blends the cached scores immediately and
+                               returns the same payload as GET /api/ai — no
+                               model is called, so this is instant and free.
   GET    /api/portfolios    -> list portfolios + which is active (read only)
   POST   /api/portfolios    -> create a new portfolio (and switch to it) (write)
                                body: {"name"}
@@ -116,6 +122,8 @@ def make_handler(
                 # Fire-and-forget: start a regeneration, report whether it began.
                 started = advisor.request_refresh() if advisor else False
                 self._send_json(200, {"started": started})
+            elif self.path == "/api/ai/weights":
+                self._handle_ai_weights()
             elif self.path == "/api/portfolios":
                 self._handle_portfolio_create()
             elif self.path == "/api/portfolios/switch":
@@ -170,6 +178,17 @@ def make_handler(
         def _handle_wishlist_remove(self):
             def action(body):
                 return {"removed": wishlist.remove(ticker=body.get("ticker"))}
+            self._run(action)
+
+        def _handle_ai_weights(self):
+            # Reweighting is arithmetic over scores we already have, so this
+            # returns the fully re-blended panel rather than kicking off a job
+            # and making the UI poll for it.
+            def action(body):
+                if advisor is None:
+                    return {"configured": False, "risk_profiles": None}
+                advisor.set_weights(body.get("weights"))
+                return advisor.get()
             self._run(action)
 
         # --- portfolio (workspace) handlers -----------------------------

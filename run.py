@@ -53,6 +53,7 @@ from backend.ai_advisor import (
     LlamaClient,
     OllamaClient,
 )
+from backend.ai_agents import AGENT_KEYS
 from backend.analyst_data import YahooAnalystProvider
 from backend.fundamentals_data import YahooFundamentalsProvider
 from backend.market_data import MarketDataProvider
@@ -60,6 +61,7 @@ from backend.news_data import (
     CompositeNewsProvider,
     FinnhubNewsProvider,
     GoogleNewsRSSProvider,
+    MacroNewsProvider,
     YahooNewsProvider,
 )
 from backend.server import run_server
@@ -76,24 +78,26 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 PORTFOLIOS_DIR = os.path.join(DATA_DIR, "portfolios")
 
 
-def _source_weights():
-    """Read the confidence-blend weights from AI_SOURCE_WEIGHTS, if set.
+def _agent_weights():
+    """Read the default agent weights from AI_AGENT_WEIGHTS, if set.
 
-    The advisor scores each holding 0-100 by averaging its AI models, which
-    count equally by default. Wall Street is not a weighted source — it is
-    evidence inside both prompts — so there is nothing to dial for it here; to
-    change how much it counts, that is now the models' judgement.
+    The advisor scores each stock 0-100 by averaging five independent agents,
+    which count equally by default. To start a fresh portfolio leaning on some
+    of them more than others, key by agent::
 
-    To lean on one model over another, key by its label::
+        AI_AGENT_WEIGHTS="statistics=2,macro=0.5"
+        AI_AGENT_WEIGHTS="expert=0"        # ignore Wall Street entirely
 
-        AI_SOURCE_WEIGHTS="gemini:gemini-3.6-flash=2"   # double this one
-        AI_SOURCE_WEIGHTS="model=1,groq:llama-3.3-70b-versatile=0.5"
+    Valid keys are the five agent keys in ``backend/ai_agents.py``:
+    company_perspective, personal, statistics, expert, macro.
 
-    Keys are "model" (the default for every model) or a specific model label.
-    Returns None when unset, leaving the equal-weight defaults in place; a
-    malformed entry is skipped rather than crashing the app on boot.
+    This is only the *default*. Each portfolio stores its own weights in
+    ``ai_weights.json`` the moment you move a slider in the UI, and those take
+    precedence — so this variable is for setting a house default, not for
+    day-to-day tuning. Returns None when unset; a malformed or unknown entry is
+    skipped rather than crashing the app on boot.
     """
-    raw = os.environ.get("AI_SOURCE_WEIGHTS", "").strip()
+    raw = os.environ.get("AI_AGENT_WEIGHTS", "").strip()
     if not raw:
         return None
     weights = {}
@@ -101,12 +105,19 @@ def _source_weights():
         if "=" not in part:
             continue
         key, value = part.rsplit("=", 1)
+        key = key.strip()
+        if key not in AGENT_KEYS:
+            print(
+                f"AI advisor: ignoring unknown agent '{key}' — "
+                f"expected one of {', '.join(AGENT_KEYS)}."
+            )
+            continue
         try:
-            weights[key.strip()] = float(value)
+            weights[key] = float(value)
         except ValueError:
             print(f"AI advisor: ignoring bad weight '{part.strip()}'.")
     if weights:
-        print(f"AI advisor: source weights {weights}")
+        print(f"AI advisor: default agent weights {weights}")
     return weights or None
 
 
@@ -137,20 +148,22 @@ def main():
     # dashboard summary: total worth + realized + real unrealized gains.
     summary = SummaryService(portfolio, sales, market)
 
-    # AI advisor: a daily agent that turns the portfolio into a 0-100
-    # confidence score per holding for the next one to three months
+    # AI advisor: five independent agents turn the portfolio into one 0-100
+    # confidence score per stock for the next one to three months
     # (100 = buy hard, 50 = hold, 0 = sell out).
     #
-    # The score is the weighted average of the two AI models, and nothing else.
-    # Wall Street's research is fed to both models as evidence — they weigh it
-    # against the fundamentals and decide for themselves — rather than being
-    # averaged in as a third vote. The whole job is a handful of calls a day,
-    # which every free tier absorbs.
+    # The score is the weighted average of the five agents in
+    # backend/ai_agents.py — company perspective, your own position and price
+    # history, raw statistics, Wall Street, and macro/policy news. Each is a
+    # separate call over its own disjoint slice of the evidence; none of them
+    # sees another's work. The weights are per-portfolio and editable from the
+    # UI, and changing one re-blends the cached scores without calling a model.
     #
-    # AI_PROVIDER is a comma-separated priority list; the first one leads and
-    # supplies the prose. Any provider without a key is skipped, so the default
-    # works with a Gemini key alone (two different Gemini models) and picks up
-    # Groq automatically the moment GROQ_API_KEY appears.
+    # AI_PROVIDER is a comma-separated list of MODELS, not of opinions: agents
+    # are handed out round-robin across whatever is configured, so a second and
+    # third provider buy parallelism and quota headroom rather than a second
+    # vote. Any provider without a key is skipped, so the default works with a
+    # Gemini key alone and picks up Groq the moment GROQ_API_KEY appears.
     #   gemini: export GEMINI_API_KEY=...  from https://aistudio.google.com/app/apikey
     #           optional: GEMINI_MODEL, GEMINI_MODEL_B, GEMINI_API_BASE
     #   groq:   export GROQ_API_KEY=...    from https://console.groq.com/keys
@@ -164,7 +177,7 @@ def main():
     # News needs no API key: Yahoo Finance first, Google News RSS as the
     # fallback for tickers Yahoo has nothing on. Set FINNHUB_API_KEY to append
     # Finnhub (richer summaries) as a last resort. Feeding real headlines is not
-    # optional — given none, the models invent confident, wrong ones.
+    # optional — given none, the agents invent confident, wrong ones.
     def _build_client(name):
         if name == "claude":
             return ClaudeClient(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -210,9 +223,11 @@ def main():
         if n.strip()
     ]
     llms = [c for c in (_build_client(n) for n in names) if c is not None]
-    # Keep at most two models: enough for a consensus, no reason to pay for more.
-    llms = [c for c in llms if c.available()][:2] or llms[:1]
+    # Cap at one model per agent. Beyond that there is nothing left to spread:
+    # models are execution capacity here, and a fifth would sit idle.
+    llms = [c for c in llms if c.available()][: len(AGENT_KEYS)] or llms[:1]
 
+    # Company news — the company-perspective agent's evidence.
     news = CompositeNewsProvider(
         [
             YahooNewsProvider(),
@@ -222,26 +237,36 @@ def main():
     )
     print(f"News: {news.describe()}")
 
+    # The other kind of news — rates, tariffs, war, policy — with nothing
+    # company-specific in it. This is the macro agent's entire evidence base,
+    # and keeping it in its own provider is what guarantees the macro agent
+    # can't quietly re-derive the company agent's answer. No API key.
+    macro_news = MacroNewsProvider()
+    print(f"Macro news: {macro_news.describe()}")
+
     # What the big financial firms conclude — the consensus rating, the
     # bull/bear split, how far apart the price targets are, and who upgraded or
-    # downgraded lately. This is fed to both models as evidence to weigh, not
-    # scored. No API key — it reuses the Yahoo session the market data holds.
+    # downgraded lately. The expert agent's evidence, and nobody else's. No API
+    # key — it reuses the Yahoo session the market data holds.
     analysts = YahooAnalystProvider(market_data)
-    print(f"Analysts: {analysts.describe()} (evidence for the models)")
+    print(f"Analysts: {analysts.describe()}")
 
-    # What those firms are looking at — valuation, margins, growth, leverage.
-    # Also prompt-side, so a model weighing a Strong Buy rating knows whether
-    # the stock trades at 12x earnings or 160x.
+    # The figures, split by ai_agents.py between the company agent (growth, the
+    # earnings record, what the business does) and the statistics agent (the
+    # multiples and the balance sheet). Neither sees the other's fields.
     fundamentals = YahooFundamentalsProvider(market_data)
     print(f"Fundamentals: {fundamentals.describe()}")
 
     advisor = AIAdvisorService(
         llms, news, market, portfolio, summary,
-        storage=WorkspaceStorage(manager, "ai_suggestions.json"), refresh_hours=2,
-        analysts=analysts, source_weights=_source_weights(),
-        fundamentals=fundamentals, wishlist=wishlist,
+        storage=WorkspaceStorage(manager, "ai_suggestions.json"),
+        analysts=analysts, agent_weights=_agent_weights(),
+        fundamentals=fundamentals, wishlist=wishlist, macro_news=macro_news,
+        weights_storage=WorkspaceStorage(manager, "ai_weights.json"),
+        sales=sales,
     )
-    # Refreshes every two hours during market hours (and once on boot).
+    # Refreshes once per trading day, at the opening bell (plus once on boot if
+    # nothing is cached). The Refresh button in the UI forces one any time.
     advisor.start_scheduler()
 
     run_server(portfolio, wishlist, summary, market, advisor, manager,

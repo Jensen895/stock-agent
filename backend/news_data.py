@@ -18,6 +18,11 @@ Providers, all reached with the Python standard library only:
   - ``FinnhubNewsProvider``   — needs ``FINNHUB_API_KEY``. Richer summaries.
   - ``CompositeNewsProvider`` — tries providers in order per ticker and keeps
                                 the first non-empty result.
+  - ``MacroNewsProvider``     — no key. The *other* kind of news: rates,
+                                inflation, tariffs, war, energy, regulation and
+                                government policy. Company-agnostic by
+                                construction, and the sole evidence the macro
+                                agent in ``ai_agents.py`` is given.
 
 Robustness, shared by all of them:
   - short-lived caching so repeated advisor runs don't hammer a source,
@@ -220,6 +225,76 @@ class YahooNewsProvider(_BaseNewsProvider):
         ]
 
 
+_GOOGLE_RSS_URL = "https://news.google.com/rss/search"
+
+
+def _google_rss_url(query: str) -> str:
+    params = urllib.parse.urlencode(
+        {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}
+    )
+    return _GOOGLE_RSS_URL + "?" + params
+
+
+def _parse_rfc822(value):
+    """Parse an RSS pubDate ("Fri, 31 Jul 2026 08:13:58 GMT") to an epoch."""
+    if not value:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(value.strip())
+    except (TypeError, ValueError, IndexError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _parse_google_rss(raw, cutoff: float) -> list:
+    """Google News RSS bytes -> headline dicts, newest first.
+
+    Each carries a private ``_ts`` epoch so callers can merge several feeds and
+    re-sort before dropping it. Shared by the company and macro providers, which
+    differ only in the query they send.
+    """
+    if not raw:
+        return []
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return []
+
+    out = []
+    for item in root.findall("./channel/item"):
+        title = (item.findtext("title") or "").strip()
+        if not title:
+            continue
+        when = _parse_rfc822(item.findtext("pubDate"))
+        if when is not None and when < cutoff:
+            continue
+
+        source_el = item.find("source")
+        source = (source_el.text or "").strip() if source_el is not None else None
+        # Titles read "Headline - Publisher"; drop the redundant suffix.
+        if source and title.endswith(f" - {source}"):
+            title = title[: -len(f" - {source}")]
+
+        out.append(
+            {
+                "headline": title,
+                "summary": "",
+                "source": source,
+                "url": (item.findtext("link") or "").strip() or None,
+                "datetime": _BaseNewsProvider._iso_from_epoch(when) if when else None,
+                "_ts": when or 0,
+            }
+        )
+    out.sort(key=lambda d: d["_ts"], reverse=True)
+    return out
+
+
 class GoogleNewsRSSProvider(_BaseNewsProvider):
     """Recent headlines from Google News RSS — no API key required.
 
@@ -232,73 +307,14 @@ class GoogleNewsRSSProvider(_BaseNewsProvider):
     ``<source>`` element, so we prefer that and strip the suffix.
     """
 
-    RSS_URL = "https://news.google.com/rss/search"
+    RSS_URL = _GOOGLE_RSS_URL
 
     def _fetch_company_news(self, ticker: str) -> list:
-        params = urllib.parse.urlencode(
-            {
-                "q": f"{ticker} stock",
-                "hl": "en-US",
-                "gl": "US",
-                "ceid": "US:en",
-            }
-        )
-        raw = self._fetch_bytes(self.RSS_URL + "?" + params)
-        if not raw:
-            return []
-        try:
-            root = ET.fromstring(raw)
-        except ET.ParseError:
-            return []
-
-        cutoff = self._cutoff_epoch()
-        out = []
-        for item in root.findall("./channel/item"):
-            title = (item.findtext("title") or "").strip()
-            if not title:
-                continue
-            when = self._parse_rfc822(item.findtext("pubDate"))
-            if when is not None and when < cutoff:
-                continue
-
-            source_el = item.find("source")
-            source = (source_el.text or "").strip() if source_el is not None else None
-            # Titles read "Headline - Publisher"; drop the redundant suffix.
-            if source and title.endswith(f" - {source}"):
-                title = title[: -len(f" - {source}")]
-
-            out.append(
-                {
-                    "headline": title,
-                    "summary": "",
-                    "source": source,
-                    "url": (item.findtext("link") or "").strip() or None,
-                    "datetime": self._iso_from_epoch(when) if when else None,
-                    "_ts": when or 0,
-                }
-            )
-
-        out.sort(key=lambda d: d["_ts"], reverse=True)
-        for d in out:
+        raw = self._fetch_bytes(_google_rss_url(f"{ticker} stock"))
+        items = _parse_google_rss(raw, self._cutoff_epoch())[:_MAX_HEADLINES]
+        for d in items:
             d.pop("_ts", None)
-        return out[:_MAX_HEADLINES]
-
-    @staticmethod
-    def _parse_rfc822(value):
-        """Parse an RSS pubDate ("Fri, 31 Jul 2026 08:13:58 GMT") to an epoch."""
-        if not value:
-            return None
-        try:
-            from email.utils import parsedate_to_datetime
-
-            dt = parsedate_to_datetime(value.strip())
-        except (TypeError, ValueError, IndexError):
-            return None
-        if dt is None:
-            return None
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
+        return items
 
 
 class FinnhubNewsProvider(_BaseNewsProvider):
@@ -387,4 +403,116 @@ class CompositeNewsProvider(_BaseNewsProvider):
             headlines = provider.get_company_news(ticker)
             if headlines:
                 return headlines
+        return []
+
+
+# --- macro news ---------------------------------------------------------
+
+# The topics the macro agent reasons over. Deliberately phrased as *conditions*
+# rather than as companies: the whole value of this feed is that nothing in it
+# is about a holding, so the macro agent cannot quietly re-derive the company
+# agent's answer from the same headlines. Each is one RSS query; the results are
+# merged and de-duplicated.
+_MACRO_TOPICS = (
+    "Federal Reserve interest rate decision",
+    "US inflation CPI jobs report economy",
+    "tariffs trade policy imports",
+    "stock market outlook S&P 500",
+    "geopolitics war oil prices",
+    "US government policy regulation taxes business",
+)
+
+# Macro moves on a slower clock than a product launch, but two weeks of rate
+# and tariff news is plenty of context for a one-to-three-month view, and
+# keeping the window short stops a stale crisis dominating the tape.
+_MACRO_LOOKBACK_DAYS = 14
+_MAX_MACRO_HEADLINES = 18
+
+# The same 30-minute cache as company news: this is one fetch per refresh at
+# most, shared by every ticker.
+_TTL_MACRO = 1800
+
+
+class MacroNewsProvider(_BaseNewsProvider):
+    """Market-wide headlines — rates, tariffs, war, policy. No API key.
+
+    The counterpart to the per-ticker providers above, and the only evidence the
+    macro agent gets. It asks Google News RSS a handful of standing topic
+    queries (``_MACRO_TOPICS``), merges the answers, drops duplicate headlines
+    and returns the newest.
+
+    Why a separate provider rather than another query on the composite: the
+    company providers are keyed by ticker and cached per ticker, and a macro
+    feed is neither. Keeping it apart also keeps the guarantee that matters —
+    that nothing company-specific reaches the macro agent — enforced by which
+    object you call, not by remembering to pass the right argument.
+    """
+
+    def __init__(self, topics=None, **kwargs):
+        super().__init__(**kwargs)
+        self.topics = tuple(topics or _MACRO_TOPICS)
+        self._macro_cache = None  # (expires_at, headlines)
+
+    # --- public API -----------------------------------------------------
+
+    def available(self) -> bool:
+        """Keyless, so always usable — outages surface as an empty tape."""
+        return True
+
+    def describe(self) -> str:
+        """Human-readable source name, for the boot log and the UI."""
+        return f"Google News RSS · {len(self.topics)} macro topics"
+
+    def get_macro_news(self) -> list:
+        """Recent market-wide headlines, newest first. [] on any failure."""
+        cached = self._macro_cache
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=_MACRO_LOOKBACK_DAYS)
+        ).timestamp()
+        try:
+            headlines = self._fetch_all(cutoff)
+        except Exception:  # a news outage must never break the advisor
+            headlines = []
+        self._macro_cache = (time.monotonic() + _TTL_MACRO, headlines)
+        return headlines
+
+    # --- internals ------------------------------------------------------
+
+    def _fetch_all(self, cutoff: float) -> list:
+        workers = min(self.max_workers, len(self.topics))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            feeds = pool.map(
+                lambda topic: _parse_google_rss(
+                    self._fetch_bytes(_google_rss_url(topic)), cutoff
+                ),
+                self.topics,
+            )
+            # Interleave rather than concatenate: taking the newest N across a
+            # flat merge would let one busy topic (there is always something
+            # about the Fed) crowd the others out entirely.
+            per_topic = [list(f) for f in feeds]
+
+        seen, merged = set(), []
+        for rank in range(max((len(f) for f in per_topic), default=0)):
+            for feed in per_topic:
+                if rank >= len(feed):
+                    continue
+                item = feed[rank]
+                key = item["headline"].strip().lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+
+        merged.sort(key=lambda d: d["_ts"], reverse=True)
+        merged = merged[:_MAX_MACRO_HEADLINES]
+        for d in merged:
+            d.pop("_ts", None)
+        return merged
+
+    def _fetch_company_news(self, ticker: str) -> list:
+        """This provider has no per-company view — that is the point."""
         return []

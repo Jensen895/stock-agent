@@ -1,23 +1,28 @@
 """Fundamentals provider — what the business is actually doing.
 
-This module exists to close a specific gap. The advisor's two AI models used to
-see only price, momentum, cost basis and headlines, while the analyst research
-in ``analyst_data.py`` comes from desks that have read the filings. A model
-asked to weigh a Strong Buy rating without knowing the stock trades at 160x
-trailing earnings is not really weighing anything. So the models get the
-numbers too: valuation, margins, returns, growth, leverage, cash generation.
+This module exists to close a specific gap. The advisor's models used to see
+only price, momentum, cost basis and headlines, while the analyst research in
+``analyst_data.py`` comes from desks that have read the filings. Judging a
+company without knowing whether it trades at 12x earnings or 160x is not really
+judging it. So the numbers are here too: valuation, margins, returns, growth,
+leverage, cash generation.
 
 Feeding these turned the reasoning concrete. Across a real 23-holding portfolio
 the share of calls citing a specific figure went from 9/23 to 23/23 — from
 "momentum turned negative, take profits" to "trailing P/E of 160.7x and
 EV/EBITDA of 105.2x leave no room for execution missteps".
 
-What crosses into the prompt is decided by an **allowlist** (``_FIELDS``
-below), not by filtering out what we don't want. Yahoo's ``quoteSummary``
-returns well over a hundred fields per module, most of them empty, fund-only,
-or redundant; naming the thirty-odd that carry signal keeps the prompt focused
-and its token cost predictable. A denylist would quietly grow every time Yahoo
-added a field.
+What crosses into the prompt is decided by an **allowlist** (``_FIELDS`` for
+numbers, ``_TEXT_FIELDS`` for sector, industry and the business description),
+not by filtering out what we don't want. Yahoo's ``quoteSummary`` returns well
+over a hundred fields per module, most of them empty, fund-only, or redundant;
+naming the thirty-odd that carry signal keeps the prompt focused and its token
+cost predictable. A denylist would quietly grow every time Yahoo added a field.
+
+These fields do not all go to the same place. ``ai_agents.py`` splits them
+between the company agent (what the business does, growth, the earnings record)
+and the statistics agent (the multiples and the balance sheet), with no overlap,
+so two of the five agents cannot reach the same conclusion from the same rows.
 
 Note on ``surprisePercent``: it is measured against analyst estimates rather
 than being pure company data. It is included because it is a historical
@@ -28,8 +33,8 @@ raw consensus estimate itself is dropped as noise; the beat/miss is the signal.
 Source: the same Yahoo ``quoteSummary`` endpoint the rest of the app uses,
 reached through ``MarketDataProvider.fetch_quote_summary`` so there is one
 cookie/crumb session for all of Yahoo. Fundamentals move on filings, so results
-are cached for six hours. Any failure yields None and the models simply reason
-without them.
+are cached for six hours. Any failure yields None and the agents that read them
+simply drop out of the average.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -45,7 +50,14 @@ _MODULES = [
     "defaultKeyStatistics",
     "financialData",
     "earningsHistory",
+    "assetProfile",
 ]
+
+# How much of the business description to keep. Yahoo's is several paragraphs
+# of boilerplate-heavy prose; the first few sentences carry the product lines
+# and end markets, which is the part the company agent actually reasons over,
+# and the rest is corporate history and an address.
+_MAX_SUMMARY_CHARS = 420
 
 # THE ALLOWLIST. Nothing reaches a prompt unless it is named here.
 #
@@ -57,9 +69,10 @@ _FIELDS = {
     # --- valuation ------------------------------------------------------
     # Forward P/E, forward EPS and PEG are built from consensus forecasts, so
     # they carry a trace of the street's view. That used to be a reason to
-    # exclude them, back when the models were kept blind to analyst opinion;
-    # now that they read the research directly, withholding the two most-used
-    # forward multiples would be purity for its own sake.
+    # exclude them, back when the models were kept blind to analyst opinion.
+    # The statistics agent is still blind to the analyst *conclusions* — it
+    # never sees a rating — and withholding the two most-used forward multiples
+    # from a screener would be purity for its own sake.
     "market_cap": ("summaryDetail", "marketCap", None),
     "trailing_pe": ("summaryDetail", "trailingPE", None),
     "forward_pe": ("summaryDetail", "forwardPE", None),
@@ -104,6 +117,39 @@ _FIELDS = {
         "defaultKeyStatistics", "heldPercentInstitutions", 100,
     ),
 }
+
+
+# The text half of the allowlist, kept separate because these are truncated
+# rather than scaled. ``sector`` and ``industry`` are what lets the macro agent
+# route a tariff or a rate cut to the right holdings; ``business_summary`` is
+# what lets the company agent reason about a product line at all. Same rule as
+# above: nothing reaches a prompt unless it is named here.
+#
+#   output_key: (yahoo_module, yahoo_field, max_chars)
+_TEXT_FIELDS = {
+    "sector": ("assetProfile", "sector", 80),
+    "industry": ("assetProfile", "industry", 80),
+    "business_summary": ("assetProfile", "longBusinessSummary", _MAX_SUMMARY_CHARS),
+}
+
+
+def _text(value, max_chars):
+    """A trimmed string field, or None when it's missing or empty.
+
+    Truncation cuts at the last sentence boundary that fits, so the model gets
+    whole sentences rather than a description that stops mid-clause.
+    """
+    if not isinstance(value, str):
+        return None
+    value = " ".join(value.split())
+    if not value:
+        return None
+    if len(value) <= max_chars:
+        return value
+    clipped = value[:max_chars]
+    stop = clipped.rfind(". ")
+    return clipped[: stop + 1] if stop > max_chars // 2 else clipped.rstrip() + "…"
+
 
 def _raw(value, scale=None):
     """Unwrap a Yahoo number ({"raw": 1.23, "fmt": "1.23"}), optionally scaled."""
@@ -178,6 +224,11 @@ class YahooFundamentalsProvider:
         out = {}
         for key, (module, field, scale) in _FIELDS.items():
             value = _raw((result.get(module) or {}).get(field), scale)
+            if value is not None:
+                out[key] = value
+
+        for key, (module, field, limit) in _TEXT_FIELDS.items():
+            value = _text((result.get(module) or {}).get(field), limit)
             if value is not None:
                 out[key] = value
 

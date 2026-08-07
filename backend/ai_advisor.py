@@ -1,22 +1,22 @@
-"""AI advisor — a daily agent that turns your portfolio into suggestions.
+"""AI advisor — five independent agents, one weighted score per stock.
 
-This is the brain of the assistant. It composes the data the rest of the app
-already produces (holdings + cost basis, live prices + momentum, the full
-unrealized-gain history, realized gains) with company fundamentals, Wall
-Street's published research, and recent news, sends it all to two LLMs, and
-blends *their* answers into a single **confidence score** per holding over the
-next one to three months — one set tuned for low risk, one for high risk.
+This is the brain of the assistant. It gathers everything the rest of the app
+knows about a portfolio (holdings and cost basis, live prices, a year of price
+history, realized and unrealized gains, company fundamentals, Wall Street's
+research, company news and the macro tape), splits it into five disjoint slices,
+asks a separate agent to score each slice, and averages the five answers into a
+single **confidence score** per stock over the next one to three months — one
+set tuned for low risk, one for high risk.
 
 The horizon is deliberately one to three months rather than a week. The
-sell-side ratings the models read are twelve-month views, so asking the
-models for a few days' outlook made them disagree with the street about the
-question rather than the answer — a 12-month "Strong Buy" and a 3-day "trim"
-are not actually contradictory. Matching the timescales keeps the street's
-research comparable with the models' own view of the same holding.
+sell-side ratings the expert agent reads are twelve-month views, so asking for a
+few days' outlook made the agents disagree with the street about the question
+rather than the answer — a 12-month "Strong Buy" and a 3-day "trim" are not
+actually contradictory.
 
 The confidence score
 --------------------
-Every holding gets one number from 0 to 100, and the number *is* the call:
+Every stock gets one number from 0 to 100, and the number *is* the call:
 
     100 ── maximum conviction to buy more
      50 ── neutral: hold
@@ -26,37 +26,50 @@ so the mid-40s-to-mid-50s band reads as hold, and the further a score sits from
 50 the stronger the buy (above) or sell (below) signal. ``_CONFIDENCE_BANDS``
 turns a score into the label and colour the UI shows next to it.
 
-That score is the weighted average of the **two AI models**, and nothing else.
+The five agents
+---------------
+The agents themselves — their roles, their prompts, and crucially which fields
+each one is allowed to see — live in ``ai_agents.py``. In short:
 
-Wall Street is an input, not a vote
------------------------------------
-The analyst research from ``analyst_data.py`` — the consensus rating, the
-bull / bear head count, the price-target spread, and which firms upgraded or
-downgraded lately — goes *into both models' prompts* as one more piece of
-evidence, alongside fundamentals, momentum, the gain history and the news. Each
-model weighs it against everything else and produces its own number. The street
-never scores anything directly.
+    company_perspective   the business: news, products, the earnings record,
+                          growth, partnerships
+    personal              your position and the stock's own price history
+    statistics            P/E, market cap, EPS, margins, debt, beta, ranges
+    expert                what Goldman, JP Morgan and the rest conclude
+    macro                 rates, tariffs, war, policy — nothing company-specific
 
-This replaced an earlier design that averaged the street in as a third source.
-Mechanical averaging was the wrong tool for it. Sell-side ratings sit almost
-entirely in the bullish half of their own scale — measured across a real
-23-holding portfolio, the consensus mean only ranged 1.3-3.5 out of a nominal
-1-5, and 22 of 23 names scored as "buy" — so any fixed mapping onto a 0-100
-conviction scale is mis-centred by construction, and the blend inherited a
-systematic upward bias that no choice of weights really fixed. A model can do
-what an average cannot: notice the skew, discount it, and read *why* the desks
-disagree instead of collapsing them into a mean.
+Independence is structural, not advisory. Each agent is its own LLM call with
+its own system prompt and its own payload, and the payloads are disjoint: the
+statistics agent never sees a headline, the company agent never sees a multiple,
+the macro agent never learns what a company sells beyond its sector. No agent
+sees another's output. They meet for the first time here, as five numbers.
 
-The trade-off is deliberate and worth stating: the two remaining sources are no
-longer independent of each other, since both read the same street view. When
-they agree it is weaker evidence than it used to be. What is gained is that the
-street's opinion is now *reasoned about* rather than averaged in.
+That matters because averaging only buys you something when the errors are
+uncorrelated. The design this replaced showed two models the *same* evidence,
+including the same analyst research, and averaged them — which measured how
+often two models read one paragraph the same way, and reported it as
+confirmation. Five narrow views that genuinely disagree carry more information
+than two broad views that mostly can't.
 
-Weights live in ``DEFAULT_SOURCE_WEIGHTS``; both models count equally by
-default. Pass ``source_weights`` to ``AIAdvisorService`` (or set
-``AI_SOURCE_WEIGHTS``) to lean on one model more, keyed by its label. A model
-that errors on a ticker drops out and the remainder is renormalised, so the
-score is always a true average of whoever answered.
+What it costs: no single agent sees the whole picture, so no single agent's
+reasoning is a complete argument, and the detail card shows all five rather than
+one tidy verdict. Reconciling them is the average's job — and the weights are in
+your hands.
+
+The weighting system
+--------------------
+The score is the weighted average of whichever agents answered, with the
+weights in ``DEFAULT_AGENT_WEIGHTS`` (all 1.0 — equal) overridden by the
+per-portfolio ``ai_weights.json``. An agent that failed, or that had no evidence
+for a ticker, simply drops out and the rest are renormalised, so the number is
+always a true average of who actually spoke rather than a figure dragged toward
+neutral by a gap.
+
+Reweighting does **not** re-run anything. Each suggestion carries the raw
+per-agent scores in ``sources``, so ``set_weights`` re-blends the cached result
+in place and returns instantly — you can dial the statistics agent to 2x and
+the macro agent to 0 and watch the whole panel resettle without spending a
+token.
 
 Layers, kept separate like the rest of the app:
 
@@ -65,36 +78,38 @@ Layers, kept separate like the rest of the app:
     reached with the Python standard library only (``urllib``), matching
     ``market_data.py`` and ``news_data.py``. They share one method,
     ``complete_json``, so they are interchangeable.
-  - ``AIAdvisorService`` — the business logic. Gathers context (including the
-    fundamentals and street research the models reason over), builds the
-    prompt, asks every configured model for structured JSON, blends their
-    scores, caches the result, persists it so it survives restarts, and
-    refreshes every two hours during market hours.
+  - ``ai_agents.py`` — who the agents are and what each may see.
+  - ``AIAdvisorService`` — the orchestration. Gathers context once, fans the
+    agent calls out concurrently, blends, caches, persists so it survives
+    restarts, and refreshes once per trading day at the opening bell.
 
-Three design notes worth keeping:
+Models are capacity here, not opinion. Configure one and it answers for all five
+agents; configure three and they are handed out round-robin so the calls spread
+across providers and quotas. Which model an agent used is recorded and shown,
+but the consensus on screen is between *agents*, never between models.
 
-  - The models are given headlines; they never search. Free-tier Gemini cannot
+Two design notes worth keeping:
+
+  - The agents are given headlines; they never search. Free-tier Gemini cannot
     use Google Search grounding (the request is rejected outright), and a model
     asked about "recent news" with none supplied will invent specific, confident,
     wrong headlines. ``news_data.py`` supplies real ones without an API key.
-  - Two models are cheaper than they look here — a refresh is a handful of
-    ~1.5k-token calls — so both are asked and their agreement is surfaced. When
-    they disagree, that is a signal, not a bug.
-  - The models get the whole picture: company fundamentals from
-    ``fundamentals_data.py`` (valuation, margins, growth, leverage, cash
-    generation) *and* the street's research from ``analyst_data.py``. They are
-    told plainly that sell-side ratings skew bullish, so they weigh that view
-    rather than deferring to it.
+  - A refresh is five agents x two risk profiles x {holdings, wishlist}, so up
+    to 20 calls — more than the eight this replaced, but each prompt carries one
+    slice instead of the whole picture, so they are individually much smaller.
+    Watch the daily allowance on free tiers, and spread the load by configuring
+    more than one provider.
 
 Everything degrades gracefully: no key at all -> the advisor reports it's "not
-configured" and the UI shows a hint; one model failing -> the other still
-answers and the error is noted; every model failing -> the last good suggestions
+configured" and the UI shows a hint; one agent failing -> the other four still
+score and the error is noted; every agent failing -> the last good suggestions
 stay on screen.
 
 Not financial advice — suggestions are generated by a model and can be wrong.
 """
 
 import json
+import math
 import re
 import threading
 import time
@@ -103,6 +118,8 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+
+from backend.ai_agents import AGENT_KEYS, AGENTS
 
 try:  # stdlib on Python 3.9+, used only for US market-hours math
     from zoneinfo import ZoneInfo
@@ -113,12 +130,31 @@ except Exception:  # pragma: no cover - fallback if tz data is unavailable
 
 
 # --- US market hours ----------------------------------------------------
+#
+# The advisor generates once per trading day, at the opening bell, so what the
+# scheduler needs is not "is it trading hours" but "when did the market last
+# open" — the bell is the trigger, not an elapsed timer.
+
+_OPEN_HOUR, _OPEN_MINUTE = 9, 30      # 9:30 ET
+_CLOSE_MINUTE = 16 * 60               # 16:00 ET
+
+# Without tz data we can't know when 9:30 ET is, so approximate with a fixed
+# UTC time. 14:30 UTC is exactly the open in winter (EST) and an hour after it
+# in summer (EDT) — late rather than early, which is the safe direction: firing
+# before the bell would score the day on the previous close.
+_FALLBACK_OPEN_HOUR, _FALLBACK_OPEN_MINUTE = 14, 30
+
+# A weekend is at most two days, so five days back or forward always spans a
+# weekday. Holidays are ignored throughout — on a closed Monday the refresh
+# simply runs against unchanged prices, which is harmless.
+_MARKET_DAY_SEARCH = 5
+
 
 def is_market_open(now_utc: datetime = None) -> bool:
     """True during regular US market hours (Mon-Fri, 9:30-16:00 ET).
 
-    Ignores holidays — good enough to gate a background refresh loop. If tz data
-    isn't available, assume open so the advisor still refreshes on schedule.
+    Ignores holidays. Only used for the status line the UI shows; the refresh
+    schedule keys off ``last_market_open`` instead.
     """
     now_utc = now_utc or datetime.now(timezone.utc)
     if _EASTERN is None:
@@ -127,7 +163,57 @@ def is_market_open(now_utc: datetime = None) -> bool:
     if et.weekday() >= 5:  # Saturday / Sunday
         return False
     minutes = et.hour * 60 + et.minute
-    return 9 * 60 + 30 <= minutes <= 16 * 60
+    return _OPEN_HOUR * 60 + _OPEN_MINUTE <= minutes <= _CLOSE_MINUTE
+
+
+def _market_local(now_utc: datetime) -> datetime:
+    """``now_utc`` in market-local terms — Eastern when tz data is available,
+    UTC as the documented approximation when it isn't."""
+    return now_utc.astimezone(_EASTERN) if _EASTERN is not None else now_utc
+
+
+def _open_on(local_day: datetime) -> datetime:
+    """The UTC instant the market opens on ``local_day``'s calendar date."""
+    hour, minute = (
+        (_OPEN_HOUR, _OPEN_MINUTE)
+        if _EASTERN is not None
+        else (_FALLBACK_OPEN_HOUR, _FALLBACK_OPEN_MINUTE)
+    )
+    return local_day.replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    ).astimezone(timezone.utc)
+
+
+def last_market_open(now_utc: datetime = None):
+    """The most recent opening bell at or before ``now_utc``, in UTC.
+
+    On a Sunday this is Friday's open; at 08:00 on a Monday it is still
+    Friday's, because Monday's bell hasn't rung yet.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    local = _market_local(now_utc)
+    for back in range(_MARKET_DAY_SEARCH):
+        day = local - timedelta(days=back)
+        if day.weekday() >= 5:
+            continue
+        opened = _open_on(day)
+        if opened <= now_utc:
+            return opened
+    return None
+
+
+def next_market_open(now_utc: datetime = None):
+    """The next opening bell strictly after ``now_utc``, in UTC."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    local = _market_local(now_utc)
+    for ahead in range(_MARKET_DAY_SEARCH):
+        day = local + timedelta(days=ahead)
+        if day.weekday() >= 5:
+            continue
+        opens = _open_on(day)
+        if opens > now_utc:
+            return opens
+    return None
 
 
 # --- Claude client (Messages API over urllib) ---------------------------
@@ -368,8 +454,8 @@ _TRANSIENT_MARKERS = (
     "temporarily",
     "could not reach",
     # Connection-level failures. These matter more than they look: the score is
-    # the average of the models, so one dropped call halves the consensus for a
-    # whole risk profile. A long prompt held open for tens of seconds gets its
+    # the average of the agents, so one dropped call costs a whole dimension of
+    # a risk profile's score. A long prompt held open for tens of seconds gets its
     # connection cut often enough that not retrying loses a model outright —
     # observed as a bare "Remote end closed connection without response", which
     # http.client raises outside the urllib error types the clients catch.
@@ -702,13 +788,14 @@ class GeminiClient:
     number here.
 
     Mind the DAILY allowance, not just the per-minute one. A refresh costs
-    ``risk profiles x models x {holdings, wishlist}`` requests — 8 on the
-    default two-model setup — and the auto-refresh fires every two hours during
-    market hours. A model whose free tier is 20 requests/day (as
-    ``gemini-3.6-flash`` was) is therefore exhausted in about two refreshes, and
-    for the rest of the day the panel silently drops to a single model with no
-    consensus behind its scores. If that happens, pair a small model with a
-    high daily cap against the better one, or move the key to a paid tier.
+    ``agents x risk profiles x {holdings, wishlist}`` requests — up to 20 —
+    spread across whatever models are configured. The auto-refresh fires once
+    per trading day at the open, so that is roughly the whole daily budget in a
+    single burst. Against a free tier of 20 requests/day (as
+    ``gemini-3.6-flash`` was) one model cannot carry all five agents on its
+    own: configure a second provider so the round-robin has somewhere to go,
+    or move the key to a paid tier. An agent that runs dry drops out and its
+    whole dimension goes missing from the score.
 
     Env:
       GEMINI_API_KEY  — required
@@ -937,17 +1024,22 @@ class GeminiClient:
 
 # --- Confidence scoring -------------------------------------------------
 #
-# One number per holding, 0-100, blended from the AI models. See the module
-# docstring for the scale; this section is the whole of the arithmetic.
+# One number per stock, 0-100, the weighted average of the five agents. See the
+# module docstring for the scale; this section is the whole of the arithmetic.
 
-# How much each AI model counts toward the blended score — equal by default.
-# The street is deliberately absent: it is evidence inside both prompts, not a
-# source with a weight (see the module docstring). To lean on one model, pass
-# ``source_weights=`` to AIAdvisorService or set AI_SOURCE_WEIGHTS keyed by that
-# model's label ("gemini:gemini-3.6-flash=2").
-DEFAULT_SOURCE_WEIGHTS = {
-    "model": 1.0,  # each configured AI model, unless its label overrides this
-}
+# How much each agent counts toward the blended score. Equal by default —
+# nothing about the five dimensions says one deserves more say a priori, and
+# starting equal makes any later imbalance a choice the user made rather than
+# one the app made quietly. Overridden per portfolio via ``ai_weights.json``
+# (edited from the UI) or at boot via AI_AGENT_WEIGHTS.
+DEFAULT_AGENT_WEIGHTS = {key: 1.0 for key in AGENT_KEYS}
+
+# A weight is a multiplier on one voice, not a budget. Zero silences an agent
+# outright (a legitimate choice — "I don't care what the street thinks"); the
+# ceiling only exists so a slip of a decimal point can't make one agent the
+# whole score while appearing to leave the others in.
+_MIN_AGENT_WEIGHT = 0.0
+_MAX_AGENT_WEIGHT = 5.0
 
 # The neutral point of the scale: no opinion either way.
 NEUTRAL_CONFIDENCE = 50.0
@@ -974,7 +1066,7 @@ _ACTION_CONFIDENCE = {"buy": 72.0, "hold": 50.0, "trim": 32.0, "sell": 12.0}
 # the exact inverse of what the number means here. Left alone, that one flipped
 # vote swings the blended score by ~30 points.
 #
-# The action is a four-value enum the models have always got right, so it acts
+# The action is a four-value enum the agents have always got right, so it acts
 # as a guardrail: a score outside its action's range is pulled to the nearest
 # edge rather than taken at face value. A model that used the scale correctly
 # is always inside its range and passes through untouched.
@@ -1025,25 +1117,37 @@ def _band(score):
     return ("sell", "Sell")
 
 
-# How far apart the sources' scores may sit before we call it a disagreement.
+# How far apart the agents' scores may sit before we call it a disagreement.
 # Measured as a spread (highest score minus lowest) rather than by comparing
 # action labels: on a continuous scale, 50 vs. 55 is agreement that happens to
 # straddle a band edge, while 50 vs. 92 is a real split even though both are
-# nominally "buy". Comparing labels flagged essentially every holding as split,
-# because the sell-side rarely publishes anything below "buy".
-_AGREEMENT_SPREAD = 15.0  # within this -> agree
-_SPLIT_SPREAD = 35.0      # beyond this -> split; in between -> mixed
+# nominally "buy".
+#
+# The thresholds widen with the number of agents, because the spread of five
+# draws is naturally wider than the spread of two even when they are describing
+# the same thing. Held at the old two-source numbers, five deliberately narrow
+# views would have been reported as "split" on essentially every ticker, which
+# is true in a useless way — the point of asking five different questions is
+# that the answers differ.
+_SPREADS = {
+    2: (15.0, 35.0),   # (agree at or below, split above) — the old pair
+    3: (18.0, 40.0),
+    4: (20.0, 43.0),
+    5: (22.0, 46.0),
+}
+_WIDEST_SPREAD = (22.0, 46.0)
 
 
 def consensus_for(scores) -> str:
-    """Classify how well the sources agree: single / agree / mixed / split."""
+    """Classify how well the agents agree: single / agree / mixed / split."""
     usable = [s for s in scores if s is not None]
     if len(usable) < 2:
         return "single"
+    agree_at, split_above = _SPREADS.get(len(usable), _WIDEST_SPREAD)
     spread = max(usable) - min(usable)
-    if spread <= _AGREEMENT_SPREAD:
+    if spread <= agree_at:
         return "agree"
-    if spread <= _SPLIT_SPREAD:
+    if spread <= split_above:
         return "mixed"
     return "split"
 
@@ -1096,14 +1200,44 @@ def _reconcile(ticker: str, action: str, confidence: float) -> float:
     return fixed
 
 
+def clamp_weight(value, fallback: float = 1.0) -> float:
+    """Coerce a user-supplied agent weight into the allowed range."""
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if weight != weight:  # NaN
+        return fallback
+    return max(_MIN_AGENT_WEIGHT, min(_MAX_AGENT_WEIGHT, weight))
+
+
+def normalize_weights(weights) -> dict:
+    """A complete, clamped weight for every agent.
+
+    Unknown keys are dropped and missing ones default to 1.0, so a weights file
+    written by an older version — or by hand — can't leave an agent unweighted
+    or smuggle in a source that doesn't exist. Setting every weight to zero
+    would silence the whole panel, which is never what someone means, so that
+    one case falls back to equal weights.
+    """
+    weights = weights if isinstance(weights, dict) else {}
+    out = {
+        key: clamp_weight(weights.get(key, DEFAULT_AGENT_WEIGHTS[key]))
+        for key in AGENT_KEYS
+    }
+    if not any(out.values()):
+        return dict(DEFAULT_AGENT_WEIGHTS)
+    return out
+
+
 def blend_confidence(sources) -> float:
-    """Weighted average of the sources that produced a score.
+    """Weighted average of the agents that produced a score.
 
     ``sources`` is the per-suggestion list of ``{confidence, weight, ...}``
-    dicts — one per AI model. A model that skipped the ticker is simply absent,
-    so the weights of those that did answer are renormalised against each other
-    and a lone survivor's score passes through unchanged rather than being
-    dragged toward neutral by the gap.
+    dicts — one per agent. An agent that had no evidence for this ticker, or
+    whose call failed, is simply absent, so the weights of those that did answer
+    are renormalised against each other and a lone survivor's score passes
+    through unchanged rather than being dragged toward neutral by the gap.
     """
     total_weight = 0.0
     total = 0.0
@@ -1126,162 +1260,165 @@ def blend_confidence(sources) -> float:
 _RISK_PROFILES = ("low", "high")
 
 # Suggestions look one to three months ahead. This matches the timescale the
-# sell-side ratings the models read are written on, so the street's view and
-# the models' own are answering the same question — see the module docstring.
+# sell-side ratings the expert agent reads are written on, so the street's view
+# and the agents' own are answering the same question.
 _MIN_HORIZON_MONTHS = 1
 _MAX_HORIZON_MONTHS = 3
 
-# Attempts per (model, risk profile) call before giving up on that model.
+# Attempts per (agent, model) call before handing the agent to the next model.
 _MAX_ATTEMPTS = 3
 
-# Wishlist uses the same conviction scale but the question is different:
-# "should I *enter* this name now?" 0 = avoid, 50 = wait, 100 = buy now. The
-# old 45-55 hold band becomes a wait band, and anything >= Lean buy (55) is
-# worth surfacing as a filtered buy signal.
-_WISHLIST_SYSTEM_PROMPT = (
-    "You are a sharp, concise equity analyst helping a retail investor decide "
-    "when to ENTER new positions from a watchlist. You are given the watchlist "
-    "tickers (stocks the investor does NOT own), with live prices, company "
-    "fundamentals per ticker, the Wall Street research on each ticker, and "
-    "recent news headlines per ticker.\n\n"
-    "WALL STREET IS EVIDENCE, NOT AN ANSWER. Each watchlist entry carries a "
-    "'wall_street' block like holdings do. Weigh it with the same standards: "
-    "sell-side ratings skew bullish, disagreement matters more than the mean, "
-    "recent upgrades/downgrades beat stale consensus, and fundamentals trump "
-    "a target that sits far above the price.\n\n"
-    "Weigh the FUNDAMENTALS, not just momentum. Same figures as holdings: "
-    "trailing multiples, margins, growth, leverage, cash generation, 52-week "
-    "range, moving averages, short interest. Percentages are already percent.\n\n"
-    "You are scoring conviction to BUY / WAIT over the coming one to three "
-    "months — business quality and entry valuation over that horizon, with "
-    "near-term noise only for the entry point.\n\n"
-    "For EACH watchlist ticker, express your view as a CONFIDENCE SCORE 0-100:\n"
-    "  100 = maximum conviction to BUY NOW\n"
-    "   75 = a solid buy\n"
-    "   50 = neutral, WAIT — not a good entry right now\n"
-    "   25 = weak, avoid\n"
-    "    0 = avoid entirely\n"
-    "Scores 45-55 all mean wait; further from 50 = stronger signal. Use the "
-    "whole range. Also give the matching 'action' label: 'buy' means buy now, "
-    "'hold' means wait — trim/sell are not used for the watchlist but accepted "
-    "as wait signals.\n\n"
-    "'horizon_months' is 1, 2 or 3 — never longer than a quarter, never in days. "
-    "Combine risk and expected gain and tailor to the requested risk tolerance. "
-    "Low risk: only flag clear risk/reward with durable business at defensible "
-    "valuation. High risk: willing to enter on weakness where growth is intact.\n\n"
-    "Be specific and actionable. When relevant give a concrete entry trigger "
-    "(e.g. 'buy below $280; avoid above $320'). Ground reasoning in the data — "
-    "cite valuation multiples, margins, growth, upcoming earnings, and specific "
-    "headlines. Keep each reasoning to roughly 6-10 short lines. Keep the "
-    "headline to one short line. Do not give generic disclaimers; be direct."
-)
+# How often the scheduler wakes to look at the clock. A minute lands the daily
+# refresh within a minute of the bell and costs nothing — the check is two
+# datetime comparisons.
+_TICK_SECONDS = 60
+
+# The two sides of the app an agent can be asked about. Holdings first, always:
+# with a per-minute quota in play the fan-out below queues in this order, and
+# the panel is built around the holdings answers.
+_KINDS = ("holdings", "wishlist")
+
+# How much of a year of daily closes to hand the personal agent. Weekly is the
+# right grain for a one-to-three-month pattern read — 250 daily points cost ten
+# times the tokens to say the same thing, and invite the model to narrate noise.
+_HISTORY_POINTS = 52
+
+# Trading days per window, for the return figures computed off the daily series.
+_RETURN_WINDOWS = {"1m": 21, "3m": 63, "6m": 126, "1y": 252}
 
 # Filter for wishlist: only show buys where the blended confidence is a
 # genuine buy signal (>= Lean buy). Anything in the hold/wait band is
 # hidden entirely — the section renders as if it doesn't exist.
 _WISHLIST_MIN_CONFIDENCE = 55
 
-_SYSTEM_PROMPT = (
-    "You are a sharp, concise equity analyst helping a retail investor manage a "
-    "small personal stock portfolio. You are given the investor's holdings (with "
-    "average cost and cost basis), live prices and today's move, the full history "
-    "of unrealized gains across 1D/1W/1M/YTD/1Y/Total windows, realized gains, "
-    "company fundamentals per ticker, the Wall Street research on each ticker, "
-    "and recent news headlines per ticker.\n\n"
-    "WALL STREET IS EVIDENCE, NOT AN ANSWER. Each holding carries a "
-    "'wall_street' block: the sell-side consensus rating and its 1-5 mean "
-    "(1 = Strong Buy, 5 = Strong Sell), how many desks rate it buy, hold and "
-    "sell, the mean / high / low price targets and what they imply from "
-    "today's price, which firms upgraded, downgraded, initiated or reiterated "
-    "lately and at what target, and a 'disagreement_note' summarising how far "
-    "apart the desks are. Weigh it as you would any other analyst's argument, "
-    "and hold it to these standards:\n"
-    "  - Sell-side ratings are structurally bullish. Desks rarely publish "
-    "sell ratings, so 'Buy' is closer to their neutral than to real "
-    "enthusiasm. Judge a rating against that baseline: a consensus mean near "
-    "2.0 is ordinary, and anything at 2.5 or worse is unusually cool. Do not "
-    "read a Buy consensus as confirmation on its own.\n"
-    "  - Disagreement matters more than the average. Forty desks quietly "
-    "agreeing is a real signal; a wide bull/bear split or price targets "
-    "spanning 100%+ of the mean means the street has no idea either, and you "
-    "should discount the consensus accordingly and say so.\n"
-    "  - Recent upgrades and downgrades carry more information than standing "
-    "ratings, which often go stale. A fresh downgrade against a Strong Buy "
-    "consensus is worth more than the consensus.\n"
-    "  - Check the street against the fundamentals and the price. If the "
-    "numbers contradict the rating, back the numbers and explain the "
-    "conflict. If a mean target sits far above the current price, ask what "
-    "has to go right for it, not whether it is achievable.\n"
-    "You may agree with the street, disagree with it, or discount it as "
-    "uninformative — but say explicitly what you did with it and why.\n\n"
-    "Weigh the FUNDAMENTALS, not just the price action. Each holding carries "
-    "trailing valuation multiples (P/E, P/S, P/B, EV/EBITDA), margins and "
-    "returns on equity and assets, year-over-year revenue and earnings growth, "
-    "cash, debt and free cash flow, beta, the 52-week range and 50/200-day "
-    "averages, short interest, and the last four quarters of actual EPS with "
-    "how far each beat or missed. Percentages are already in percent. Read "
-    "them together: a rich multiple is only a problem if growth or margins "
-    "don't support it, a cheap one is only an opportunity if the business "
-    "isn't deteriorating, and leverage matters more when cash flow is thin. "
-    "Say which specific figures drove your score.\n\n"
-    "You are scoring conviction to buy, hold, or sell over the coming one to "
-    "three months — not forecasting a few days of price action. Business "
-    "quality, valuation and the direction of the fundamentals should carry "
-    "real weight over that horizon; day-to-day momentum and a single "
-    "headline should carry much less. Ask what this position is worth owning "
-    "into the next quarter, and let near-term noise inform the entry or exit "
-    "point rather than the verdict.\n\n"
-    "For EACH holding, express your view as a CONFIDENCE SCORE — an integer "
-    "from 0 to 100 that measures how strongly you'd act:\n"
-    "  100 = maximum conviction to BUY MORE\n"
-    "   75 = a solid buy\n"
-    "   50 = neutral, HOLD — you'd neither add nor reduce\n"
-    "   25 = you'd trim the position\n"
-    "    0 = maximum conviction to SELL the entire position\n"
-    "Scores from about 45 to 55 all mean hold; the further a score is from 50, "
-    "the stronger the signal. Use the whole range — reserve the extremes for "
-    "genuine conviction, and don't park everything near 50 to hedge. Also give "
-    "the matching 'action' label, and make sure the two agree.\n\n"
-    "'horizon_months' is when you expect this call to play out: 1, 2 or 3 "
-    "months — never longer than a quarter, never expressed in days. Combine "
-    "both risk and expected gain, and tailor everything to the requested risk "
-    "tolerance.\n\n"
-    "Be specific and actionable. When relevant, give a concrete price trigger "
-    "for the period (e.g. 'add below $280; if it closes under $240 the thesis "
-    "is broken, sell'). Ground your reasoning in the data provided — cite the "
-    "valuation multiples, margins and growth, the cost basis, upcoming "
-    "earnings, and specific headlines. Keep each detailed "
-    "reasoning to roughly 8-12 short lines. Keep the summary headline to one "
-    "short line. Do not give generic disclaimers; be direct."
-)
+
+# --- Price history, measured ---------------------------------------------
+#
+# The personal agent is asked whether the current setup matches the patterns
+# that have worked before, which means it needs the shape of the past year, not
+# a wall of numbers. These helpers do the arithmetic here rather than in the
+# prompt: a model handed 250 closes and asked for a six-month return will
+# usually get it roughly right, occasionally get it badly wrong, and always
+# spend tokens on it. Computed figures are exact and free.
+
+
+def _pct(value, base):
+    """``value`` as a percentage change from ``base``, or None."""
+    if value is None or not base:
+        return None
+    return round((value - base) / base * 100, 2)
+
+
+def _iso_day(ts_ms) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def _volatility_pct(closes):
+    """Annualised volatility of daily returns, in percent, or None.
+
+    Log returns, sample standard deviation, sqrt-of-252 scaling — the ordinary
+    convention, so the number means what a reader expects it to mean.
+    """
+    returns = [
+        math.log(cur / prev)
+        for prev, cur in zip(closes, closes[1:])
+        if prev > 0 and cur > 0
+    ]
+    if len(returns) < 20:
+        return None
+    mean = sum(returns) / len(returns)
+    variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+    return round(math.sqrt(variance) * math.sqrt(252) * 100, 1)
+
+
+def _price_path(points):
+    """Downsample daily closes to roughly weekly, always ending on the latest.
+
+    Plain slicing would drop the most recent close whenever the series length
+    isn't a multiple of the step, which is the one point the agent most needs —
+    so the last sample is replaced with the true last close.
+    """
+    step = max(1, len(points) // _HISTORY_POINTS)
+    sampled = points[::step][-_HISTORY_POINTS:]
+    if sampled and sampled[-1][0] != points[-1][0]:
+        sampled = sampled[:-1] + [points[-1]]
+    return [{"d": _iso_day(ts), "c": round(close, 2)} for ts, close in sampled]
+
+
+def _history_stats(series):
+    """A year of daily closes -> the measured pattern, or None if too thin.
+
+    ``series`` is ``[(ts_ms, close), ...]`` oldest first, as ``market_data.py``
+    returns it. A newly listed stock with a few weeks of history still gets
+    whatever windows it can fill; the rest are simply absent.
+    """
+    points = [(ts, close) for ts, close in (series or []) if close]
+    if len(points) < 10:
+        return None
+
+    closes = [close for _, close in points]
+    last = closes[-1]
+    out = {}
+
+    for label, days in _RETURN_WINDOWS.items():
+        if len(closes) > days:
+            out[f"return_{label}_pct"] = _pct(last, closes[-1 - days])
+    if "return_1y_pct" not in out and len(closes) >= 40:
+        # Not a full year of history — say so rather than silently omitting the
+        # long view, which would read as "flat over a year".
+        out["return_since_listing_pct"] = _pct(last, closes[0])
+        out["history_days"] = len(closes)
+
+    high, low = max(closes), min(closes)
+    out["range_high"] = round(high, 2)
+    out["range_low"] = round(low, 2)
+    out["vs_52w_high_pct"] = _pct(last, high)
+    out["vs_52w_low_pct"] = _pct(last, low)
+
+    for label, days in (("50d", 50), ("200d", 200)):
+        if len(closes) >= days:
+            out[f"vs_{label}_pct"] = _pct(last, sum(closes[-days:]) / days)
+
+    volatility = _volatility_pct(closes)
+    if volatility is not None:
+        out["volatility_pct"] = volatility
+
+    out["path"] = _price_path(points)
+    return out
 
 
 class AIAdvisorService:
-    """Generates, caches, and refreshes the AI suggestions.
+    """Runs the five agents, blends their scores, caches and refreshes.
 
     Composes one *or more* LLM clients with the market/portfolio/summary
-    services, the news provider, and the analyst-ratings provider. Produces both
-    a low-risk and a high-risk set every refresh and caches them together, so
-    the UI's risk toggle never triggers a new API call. Persists the latest
-    result so a restart shows the last suggestions.
+    services and the news, analyst and fundamentals providers. Produces both a
+    low-risk and a high-risk set every refresh and caches them together, so the
+    UI's risk toggle never triggers a new API call. Persists the latest result
+    so a restart shows the last suggestions.
 
-    Blending: every model is asked the same question, and their scores are
-    averaged with the analyst consensus into one confidence per ticker (see the
-    module docstring). Each suggestion carries the full ``sources`` breakdown —
-    who scored it what, at what weight — so the UI can show how the number was
-    reached, plus a ``consensus`` of ``agree`` / ``split`` / ``single``:
-    disagreement between the street and the models is a signal worth seeing.
-    The lead model (first in the list) supplies the prose.
+    Blending: each agent in ``ai_agents.AGENTS`` gets its own call with its own
+    disjoint slice of the context (see that module), and the five scores are
+    averaged with the per-agent weights. Every suggestion carries the full
+    ``sources`` breakdown — which agent scored it what, on which model, at what
+    weight, with its own headline, reasoning, trigger and risks — so the UI can
+    show the whole argument rather than one voice, plus a ``consensus`` of
+    ``agree`` / ``mixed`` / ``split`` / ``single`` measuring how far apart the
+    five landed. Five narrow views disagreeing is the interesting case, and the
+    panel says so.
 
-    This is affordable because the workload is tiny — two risk profiles times a
-    couple of models, a few times a day, at roughly 1.5k input tokens a call.
-    All calls in a refresh run concurrently (analyst ratings included), so
-    latency is the slowest single call rather than their sum.
+    Because the raw per-agent scores are kept on every suggestion, changing the
+    weights is pure arithmetic: ``set_weights`` re-blends in place without
+    calling a model.
+
+    All calls in a refresh run concurrently, so latency is roughly the slowest
+    single call rather than their sum — bounded by the lane cap that keeps a
+    free tier's per-minute quota intact.
     """
 
     def __init__(self, clients, news, market, portfolio, summary,
-                 storage=None, refresh_hours: int = 2, analysts=None,
-                 source_weights=None, fundamentals=None, wishlist=None):
+                 storage=None, analysts=None,
+                 agent_weights=None, fundamentals=None, wishlist=None,
+                 macro_news=None, weights_storage=None, sales=None):
         # Accept a single client or a list, so existing callers keep working.
         if not isinstance(clients, (list, tuple)):
             clients = [clients]
@@ -1291,29 +1428,76 @@ class AIAdvisorService:
         self.portfolio = portfolio
         self.summary = summary
         self.storage = storage
-        self.refresh_seconds = refresh_hours * 3600
-        # The third opinion. Optional: without it the blend is just the models.
+        # Sell-side research — the expert agent's entire evidence base. Without
+        # it that agent has nothing to read and drops out of the average.
         self.analysts = analysts
-        # Company fundamentals for the prompt — the evidence the street works
-        # from, never its conclusions. Optional; the models simply reason on
-        # price, momentum and news without it, as they originally did.
+        # Company fundamentals, split between the company and statistics agents
+        # by ``ai_agents.py``. Without it both of those agents go quiet.
         self.fundamentals = fundamentals
+        # Market-wide headlines — the macro agent's entire evidence base.
+        self.macro_news = macro_news
         # Wishlist: stocks you don't own yet but may want to buy. Optional;
         # when wired in the advisor also scores each wishlist name for a buy
         # entry and filters to the ones worth showing.
         self.wishlist = wishlist
-        self.weights = {**DEFAULT_SOURCE_WEIGHTS, **(source_weights or {})}
+        # The sales log, so the personal agent can see the investor's own
+        # earlier exits in a name. Optional; falls back to the summary
+        # service's log, which is the same object in the default wiring.
+        self.sales = sales if sales is not None else getattr(summary, "sales", None)
+
+        # Per-portfolio weights live on disk next to the suggestions; the
+        # constructor argument (from AI_AGENT_WEIGHTS) is the default a
+        # portfolio starts from before anyone touches the sliders.
+        self.weights_storage = weights_storage
+        self._default_weights = normalize_weights(
+            {**DEFAULT_AGENT_WEIGHTS, **(agent_weights or {})}
+        )
+        self.weights = self._load_weights()
 
         self._lock = threading.Lock()
         self._refreshing = False
         self._latest = self._load_persisted()
 
-    # --- source weighting -----------------------------------------------
+    # --- agent weighting --------------------------------------------------
 
-    def _model_weight(self, label: str) -> float:
-        """Weight for one model: its own label if given one, else the shared
-        "model" weight."""
-        return float(self.weights.get(label, self.weights.get("model", 1.0)))
+    def _agent_weight(self, key: str) -> float:
+        """How much this agent counts toward the blended score."""
+        return float(self.weights.get(key, DEFAULT_AGENT_WEIGHTS.get(key, 1.0)))
+
+    def _load_weights(self) -> dict:
+        """The active portfolio's saved weights, or the boot defaults."""
+        if self.weights_storage is None:
+            return dict(self._default_weights)
+        try:
+            saved = (self.weights_storage.load() or {}).get("weights")
+        except Exception:
+            saved = None
+        if not saved:
+            return dict(self._default_weights)
+        return normalize_weights({**self._default_weights, **saved})
+
+    def set_weights(self, weights) -> dict:
+        """Change the agent weights and re-blend the cached scores in place.
+
+        No model is called. Every suggestion already carries each agent's raw
+        score, so the new average is arithmetic over data we have — which is
+        what makes the sliders usable: drag one, see the whole panel resettle,
+        spend nothing. Returns the weights actually stored (clamped and
+        completed).
+        """
+        self.weights = normalize_weights(weights)
+        self._persist_weights()
+        with self._lock:
+            if self._latest and self._latest.get("risk_profiles"):
+                self._latest = {
+                    **self._latest,
+                    "risk_profiles": {
+                        risk: self._reblend_profile(profile)
+                        for risk, profile in self._latest["risk_profiles"].items()
+                    },
+                }
+                self._persist(self._latest)
+        return dict(self.weights)
 
     # --- public API -----------------------------------------------------
 
@@ -1322,41 +1506,57 @@ class AIAdvisorService:
         return any(c.available() for c in self.clients)
 
     def active_clients(self) -> list:
-        """The configured clients, in priority order (first one leads)."""
+        """The configured models, in the order agents are assigned to them."""
         return [c for c in self.clients if c.available()]
 
     def analysts_available(self) -> bool:
-        """True when the Wall Street consensus source is wired in and usable."""
+        """True when the expert agent has sell-side research to read."""
         return self.analysts is not None and self.analysts.available()
 
     def fundamentals_available(self) -> bool:
-        """True when company fundamentals can be fed to the models."""
+        """True when the company and statistics agents have figures to read."""
         return self.fundamentals is not None and self.fundamentals.available()
+
+    def macro_available(self) -> bool:
+        """True when the macro agent has a market-wide news tape to read."""
+        return self.macro_news is not None and self.macro_news.available()
 
     def get(self) -> dict:
         """Return the latest cached suggestions plus status for the UI."""
         latest = self._latest
+        upcoming = next_market_open()
         return {
             "configured": self.available(),
             "models": [c.label for c in self.active_clients()],
+            # Who the agents are, so the UI renders the weight controls and the
+            # per-agent breakdown from the roster rather than hardcoding five.
+            "agents": [a.describe() for a in AGENTS],
+            "agent_weights": dict(self.weights),
+            "default_agent_weights": dict(DEFAULT_AGENT_WEIGHTS),
             "news_configured": self.news.available(),
             "news_sources": getattr(self.news, "describe", lambda: "")(),
-            # Evidence inside both models' prompts — not a scoring source.
+            # Which agents actually have an evidence source wired in.
             "analysts_configured": self.analysts_available(),
             "analyst_source": (
                 self.analysts.describe() if self.analysts_available() else None
             ),
-            # Fundamentals feed the models' reasoning, not the blend.
             "fundamentals_configured": self.fundamentals_available(),
             "fundamentals_source": (
                 self.fundamentals.describe()
                 if self.fundamentals_available()
                 else None
             ),
-            "source_weights": self.weights,
+            "macro_configured": self.macro_available(),
+            "macro_source": (
+                self.macro_news.describe() if self.macro_available() else None
+            ),
             "refreshing": self._refreshing,
             "market_open": is_market_open(),
-            "refresh_hours": self.refresh_seconds // 3600,
+            # Once a trading day, at the bell. `next_refresh` is when that
+            # will next happen, so the UI can say so rather than leaving a
+            # day-old timestamp looking stale.
+            "refresh_schedule": "daily at market open",
+            "next_refresh": upcoming.isoformat() if upcoming else None,
             "generated_at": latest.get("generated_at") if latest else None,
             "risk_profiles": latest.get("risk_profiles") if latest else None,
             "model_errors": latest.get("model_errors") if latest else None,
@@ -1364,12 +1564,14 @@ class AIAdvisorService:
         }
 
     def reload(self) -> None:
-        """Re-read persisted suggestions for the now-active portfolio.
+        """Re-read persisted suggestions and weights for the now-active
+        portfolio.
 
         Called after the active portfolio is switched or deleted: the cached
-        ``_latest`` belongs to the old portfolio, so drop it and load whatever
-        the new one has (which may be nothing yet)."""
+        ``_latest`` and weights belong to the old portfolio, so drop them and
+        load whatever the new one has (which may be nothing yet)."""
         with self._lock:
+            self.weights = self._load_weights()
             self._latest = self._load_persisted()
 
     def request_refresh(self) -> bool:
@@ -1382,27 +1584,51 @@ class AIAdvisorService:
 
     def start_scheduler(self):
         """Start the background loop: generate once on boot (if nothing is
-        cached), then refresh every ``refresh_hours`` during market hours."""
+        cached), then once per trading day at the opening bell."""
         if not self.available():
             print("AI advisor: no model configured — advisor disabled.")
             return
         labels = ", ".join(c.label for c in self.active_clients())
-        print(f"AI advisor: {labels}")
+        upcoming = next_market_open()
+        print(
+            f"AI advisor: {labels} — refreshing daily at the opening bell"
+            + (f" (next {upcoming.isoformat()})" if upcoming else "")
+        )
         threading.Thread(target=self._scheduler_loop, daemon=True).start()
 
     # --- scheduler ------------------------------------------------------
 
     def _scheduler_loop(self):
-        # Generate immediately on boot if we have nothing to show yet.
+        # Generate immediately on boot if we have nothing to show yet — a blank
+        # panel until the next bell would be worse than one extra refresh.
         if self._latest is None:
             self._safe_generate()
         while True:
-            time.sleep(300)  # re-check every 5 minutes
-            if not is_market_open():
-                continue
-            last = self._generated_at_epoch()
-            if last is None or (time.time() - last) >= self.refresh_seconds:
+            time.sleep(_TICK_SECONDS)
+            if self._refresh_due():
                 self._safe_generate()
+
+    def _refresh_due(self) -> bool:
+        """True when the last generation predates the most recent opening bell.
+
+        This is what makes the schedule "once a day at the open" rather than
+        "every N hours": the trigger is the bell, not an elapsed timer. Two
+        consequences worth naming, both deliberate:
+
+          - It **catches up**. A laptop asleep at 9:30 refreshes as soon as it
+            wakes, rather than skipping the day and showing yesterday's numbers
+            until tomorrow. That can mean a refresh outside market hours, or on
+            a Saturday when Friday's was missed — but only ever one, since the
+            next check finds the generation is newer than the bell.
+          - It **can't double-fire**. Restarting the app ten times after the
+            open regenerates nothing; the cached result is already newer than
+            today's bell.
+        """
+        opened = last_market_open()
+        if opened is None:  # no weekday found — only possible without tz data
+            return False
+        last = self._generated_at_epoch()
+        return last is None or last < opened.timestamp()
 
     def _safe_generate(self):
         """Run one generation, guarded so only one runs at a time. Never raises."""
@@ -1432,74 +1658,50 @@ class AIAdvisorService:
             raise RuntimeError("No AI model is configured.")
 
         wishlist_tickers = [w["ticker"] for w in context.get("wishlist", [])]
+        kinds = ["holdings"] + (["wishlist"] if wishlist_tickers else [])
 
-        # Every (risk profile x model x kind) triple is an independent call —
-        # fan them all out at once so a refresh costs one round-trip of
-        # wall-clock. Holdings and wishlist are asked separately: they're
-        # different questions ("stay in?" vs "get in?") and one prompt per job
-        # keeps each focused and token-light. The wishlist set is skipped
-        # entirely when there's nothing on the list.
-        def jobs(kind):
-            return [(risk, client, kind) for risk in _RISK_PROFILES for client in clients]
+        # Every (agent x risk profile x kind) triple is one independent call.
+        # Fan them all out at once so a refresh costs roughly one round-trip of
+        # wall-clock rather than the sum of twenty.
+        #
+        # Holdings jobs are queued first, and agents in roster order within
+        # them: with a per-minute quota in play the lane cap below decides who
+        # gets the first wave, and the panel is built around the holdings
+        # answers. An empty portfolio still gets its holdings calls — that is
+        # what produces the note the panel leads with.
+        all_jobs = [
+            (agent, risk, kind)
+            for kind in kinds
+            for risk in _RISK_PROFILES
+            for agent in AGENTS
+        ]
 
-        # An empty portfolio still gets a holdings call — it's what produces
-        # the portfolio note the panel leads with.
-        all_jobs = jobs("holdings")
-        if wishlist_tickers:
-            all_jobs += jobs("wishlist")
-
-        raw = {risk: {} for risk in _RISK_PROFILES}
-        raw_wishlist = {risk: {} for risk in _RISK_PROFILES}
+        # raw[kind][risk][agent_key] = (model_label, cleaned_profile)
+        raw = {kind: {risk: {} for risk in _RISK_PROFILES} for kind in _KINDS}
         errors = []
 
-        def ask(risk, client, kind):
-            """One model, one risk profile, retrying transient upstream errors."""
-            if kind == "wishlist":
-                system = _WISHLIST_SYSTEM_PROMPT
-                prompt = self._build_wishlist_prompt(context, risk)
-            else:
-                system = _SYSTEM_PROMPT
-                prompt = self._build_prompt(context, risk)
-            backoff = 2.0
-            for attempt in range(_MAX_ATTEMPTS):
-                try:
-                    return client.complete_json(system, prompt, _SUGGESTION_SCHEMA)
-                except Exception as e:
-                    if attempt == _MAX_ATTEMPTS - 1 or not _is_transient(e):
-                        raise
-                    # Take the provider at its word when it names a delay —
-                    # a rate limit clears on its own schedule, not ours.
-                    wait = max(backoff, _retry_after(e))
-                    print(
-                        f"AI advisor: {client.label} ({risk}/{kind}) transient error, "
-                        f"retrying in {wait:.0f}s — {e}"
-                    )
-                    time.sleep(wait)
-                    backoff *= 2
-
         tickers = [h["ticker"] for h in context["holdings"]]
-        # Cap the fan-out at what it was before the wishlist doubled the job
-        # count. Firing all eight at once burst straight through the free
-        # tier's per-minute quota, and the holdings calls — the ones the panel
-        # is actually built around — were the ones that lost the race.
-        # Holdings jobs are queued first, so they claim the first wave.
-        lanes = max(1, min(len(all_jobs), len(clients) * len(_RISK_PROFILES)))
+        lanes = max(2, min(len(all_jobs), len(clients) * 2))
         with ThreadPoolExecutor(max_workers=lanes) as pool:
-            futures = {pool.submit(ask, r, c, k): (r, c, k) for r, c, k in all_jobs}
+            futures = {
+                pool.submit(self._run_agent, agent, risk, kind, context, clients):
+                    (agent, risk, kind)
+                for agent, risk, kind in all_jobs
+            }
             for future in as_completed(futures):
-                risk, client, kind = futures[future]
+                agent, risk, kind = futures[future]
                 try:
-                    cleaned = self._clean_profile(future.result())
+                    result = future.result()
                 except Exception as e:
-                    tag = f"{client.label} ({risk}/{kind})"
-                    errors.append(f"{tag}: {e}")
+                    errors.append(f"{agent.name} ({risk}/{kind}): {e}")
                     continue
-                if kind == "wishlist":
-                    raw_wishlist[risk][client.label] = cleaned
-                else:
-                    raw[risk][client.label] = cleaned
+                if result is None:
+                    continue  # the agent had no evidence for this side
+                label, cleaned = result
+                raw[kind][risk][agent.key] = (label, cleaned)
 
-        # Street views for detail cards (evidence, not scored).
+        # The street's research, kept alongside the result so the detail card
+        # can show what the expert agent was actually reading.
         street = {
             h["ticker"]: h.get("wall_street")
             for h in context["holdings"]
@@ -1513,63 +1715,121 @@ class AIAdvisorService:
 
         profiles = {}
         for risk in _RISK_PROFILES:
-            ordered = [
-                (c.label, raw[risk][c.label]) for c in clients if c.label in raw[risk]
-            ]
-            w_ordered = [
-                (c.label, raw_wishlist[risk][c.label]) for c in clients if c.label in raw_wishlist[risk]
-            ]
-            if ordered:
-                profile = self._merge_profiles(ordered, street, tickers)
-            elif w_ordered:
-                # The holdings call failed, or there are no holdings at all,
-                # but the wishlist answered — give the buys somewhere to live
-                # rather than dropping this risk profile entirely.
-                profile = {
-                    "portfolio_note": w_ordered[0][1].get("portfolio_note", ""),
-                    "suggestions": [],
-                    "models": [label for label, _ in w_ordered],
-                    "avg_confidence": None,
-                    "agreement": {"agreed": 0, "mixed": 0, "split": 0, "total": 0},
-                }
+            holdings_votes = self._ordered_votes(raw["holdings"][risk])
+            wishlist_votes = self._ordered_votes(raw["wishlist"][risk])
+            if holdings_votes:
+                profile = self._merge_agents(holdings_votes, street, tickers)
+            elif wishlist_votes:
+                # No agent answered on holdings — or there are none — but the
+                # wishlist did. Give those buys somewhere to live rather than
+                # dropping the whole risk profile.
+                profile = self._empty_profile(wishlist_votes)
             else:
                 continue  # nothing came back for this risk at all
 
             profile["wishlist"] = self._merge_wishlist(
-                w_ordered, w_street, wishlist_tickers
+                wishlist_votes, w_street, wishlist_tickers
             )
             profiles[risk] = profile
 
         if not profiles:
-            raise RuntimeError("; ".join(errors) or "All models failed.")
+            raise RuntimeError("; ".join(errors) or "Every agent failed.")
 
         self._latest = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "risk_profiles": profiles,
-            # Partial failures are not fatal, but the UI should still say so.
+            # Partial failures are not fatal, but the UI should still say so —
+            # a score blended from three agents is not the one from five.
             "model_errors": errors or None,
             "error": None,
         }
         self._persist(self._latest)
 
         note = ", ".join(
-            f"{risk}: {p['agreement']['agreed']}/{p['agreement']['total']} agreed"
+            f"{risk}: {len(p['agents'])} agents, "
+            f"{p['agreement']['agreed']}/{p['agreement']['total']} agreed"
             for risk, p in profiles.items()
         )
-        # Append wishlist counts when present for log visibility.
-        w_note = ""
-        for risk, p in profiles.items():
-            wl = (p.get("wishlist") or {}).get("suggestions") or []
-            if wl:
-                w_note += f" {risk}/wishlist:{len(wl)}"
+        w_note = "".join(
+            f" {risk}/wishlist:{len((p.get('wishlist') or {}).get('suggestions') or [])}"
+            for risk, p in profiles.items()
+            if (p.get("wishlist") or {}).get("suggestions")
+        )
         print(f"AI advisor: refreshed at {self._latest['generated_at']} ({note}{w_note}).")
 
+    def _run_agent(self, agent, risk: str, kind: str, context: dict, clients: list):
+        """Ask one agent one question. Returns (model_label, cleaned) or None.
+
+        Model choice is capacity management, not opinion: agents are handed out
+        round-robin so the calls spread across whatever providers are
+        configured, and an agent whose assigned model is rate-limited or down
+        falls through to the next one rather than dropping out of the average
+        entirely. Losing an agent costs a whole dimension of the score, which is
+        a far worse outcome than one extra call against a second provider.
+        """
+        payload = agent.payload(context, kind)
+        if not payload:
+            return None  # this agent has no evidence on this side — stay quiet
+
+        system = agent.system(kind)
+        prompt = agent.prompt(payload, kind, risk)
+
+        start = AGENT_KEYS.index(agent.key) % len(clients)
+        rotation = [clients[(start + i) % len(clients)] for i in range(len(clients))]
+        last_error = None
+        for client in rotation[:2]:  # assigned model, then one fallback
+            try:
+                return client.label, self._clean_profile(
+                    self._ask(client, system, prompt, agent, risk, kind)
+                )
+            except Exception as e:
+                last_error = e
+                if len(rotation) > 1:
+                    print(
+                        f"AI advisor: {agent.name} ({risk}/{kind}) failed on "
+                        f"{client.label} — {e}"
+                    )
+        raise last_error
+
+    @staticmethod
+    def _ask(client, system: str, prompt: str, agent, risk: str, kind: str) -> dict:
+        """One call to one model, retrying transient upstream errors."""
+        backoff = 2.0
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                return client.complete_json(system, prompt, _SUGGESTION_SCHEMA)
+            except Exception as e:
+                if attempt == _MAX_ATTEMPTS - 1 or not _is_transient(e):
+                    raise
+                # Take the provider at its word when it names a delay — a rate
+                # limit clears on its own schedule, not ours.
+                wait = max(backoff, _retry_after(e))
+                print(
+                    f"AI advisor: {client.label} / {agent.name} ({risk}/{kind}) "
+                    f"transient error, retrying in {wait:.0f}s — {e}"
+                )
+                time.sleep(wait)
+                backoff *= 2
+
+    @staticmethod
+    def _ordered_votes(by_key: dict) -> list:
+        """The agents that answered, in roster order: [(agent, label, profile)].
+
+        Roster order rather than completion order, so the per-agent chips in the
+        UI always appear in the same places and a reader learns where to look.
+        """
+        return [
+            (agent, by_key[agent.key][0], by_key[agent.key][1])
+            for agent in AGENTS
+            if agent.key in by_key
+        ]
+
     def _gather_analysts(self, tickers) -> dict:
-        """Wall Street's view per ticker — evidence for the models' prompts.
+        """Wall Street's view per ticker — the expert agent's evidence.
 
         Returns {ticker: view-or-None}, and {} if the source isn't wired in or
-        falls over: a ratings outage must only cost the models one input, not
-        the whole refresh.
+        falls over: a ratings outage must only cost one agent, not the whole
+        refresh.
         """
         if not self.analysts_available() or not tickers:
             return {}
@@ -1579,93 +1839,173 @@ class AIAdvisorService:
             print(f"AI advisor: analyst ratings unavailable: {e}")
             return {}
 
-    def _merge_profiles(self, ordered: list, street: dict = None,
-                        holdings: list = None) -> dict:
-        """Blend one cleaned profile per model into a single scored profile.
+    def _gather_macro_news(self) -> list:
+        """Market-wide headlines — the macro agent's evidence.
 
-        ``ordered`` is ``[(label, profile), ...]`` in priority order, ``street``
-        is ``{ticker: analyst-view-or-None}`` and ``holdings`` is the tickers
-        actually owned. Suggestions are matched by ticker; the lead model
-        supplies the prose, while the headline number — ``confidence`` — is the
-        weighted average of the models that scored that ticker. Each model is
-        recorded in ``sources`` so the UI can show the breakdown behind the
-        score.
-
-        The street's view is attached to each suggestion as ``wall_street``. It
-        carries no score and takes no part in the average: it is the evidence
-        both models were shown, kept alongside the result so the UI can display
-        what they were reasoning from.
+        Returns [] if the source isn't wired in or falls over, in which case the
+        macro agent has nothing to read and drops out of the average.
         """
-        street = street or {}
-        lead_profile = ordered[0][1]
-        by_model = {
-            label: {s["ticker"]: s for s in profile["suggestions"] if s["ticker"]}
-            for label, profile in ordered
+        if not self.macro_available():
+            return []
+        try:
+            return self.macro_news.get_macro_news() or []
+        except Exception as e:
+            print(f"AI advisor: macro news unavailable: {e}")
+            return []
+
+    # --- blending -------------------------------------------------------
+
+    def _source_from(self, agent, label: str, suggestion: dict) -> dict:
+        """One agent's vote on one ticker, as the UI will read it.
+
+        Carries the agent's whole answer, not just its number: the detail card
+        shows five short arguments side by side instead of one long one, and the
+        blended score is only honest if the reader can see what went into it.
+        """
+        return {
+            "kind": "agent",
+            "key": agent.key,
+            "name": agent.name,
+            "short": agent.short,
+            "focus": agent.focus,
+            "model": label,
+            "confidence": suggestion["confidence"],
+            "action": suggestion["action"],
+            "label": label_for_confidence(suggestion["confidence"]),
+            "weight": self._agent_weight(agent.key),
+            "horizon_months": suggestion["horizon_months"],
+            # "detail" is the field the compact views already read.
+            "detail": suggestion["headline"],
+            "reasoning": suggestion["reasoning"],
+            "price_trigger": suggestion["price_trigger"],
+            "risks": suggestion["risks"],
         }
 
-        # One row per holding, in the portfolio's own order. Anchoring to the
-        # holdings rather than to the union of what the models returned drops
-        # invented symbols — a model that answers for "HIMSS" when you hold
-        # "HIMS" would otherwise add a phantom position to the panel.
-        if holdings:
-            tickers = [t for t in holdings if any(t in m for m in by_model.values())]
+    @staticmethod
+    def _lead_source(sources: list):
+        """The agent whose view is doing the most work in the average.
+
+        Weight times distance from neutral: a strongly-held view at a low weight
+        and a mild view at a high weight both move the blended score, and this
+        picks whichever moved it further. That agent's headline becomes the
+        summary line, so the one-liner explains the number instead of narrating
+        whichever agent happened to be listed first.
+        """
+        scored = [
+            s for s in sources if s.get("confidence") is not None and s.get("weight")
+        ]
+        if not scored:
+            return None
+        return max(scored, key=lambda s: s["weight"] * abs(s["confidence"] - 50.0))
+
+    @staticmethod
+    def _blended_horizon(sources: list) -> int:
+        """The agents' average horizon, rounded into the 1-3 month window."""
+        months = [
+            s["horizon_months"] for s in sources if s.get("horizon_months") is not None
+        ]
+        if not months:
+            return _MIN_HORIZON_MONTHS
+        return max(
+            _MIN_HORIZON_MONTHS,
+            min(_MAX_HORIZON_MONTHS, round(sum(months) / len(months))),
+        )
+
+    def _blend(self, ticker: str, sources: list, street=None) -> dict:
+        """One ticker's five (or fewer) agent votes -> one scored suggestion."""
+        confidence = blend_confidence(sources)
+        if confidence is None:
+            confidence = NEUTRAL_CONFIDENCE
+        lead = self._lead_source(sources)
+        # Agreement is measured over the agents that are actually counted. A
+        # silenced agent still has a view and the UI still shows it, but calling
+        # a holding "split" because an agent you weighted to zero disagrees
+        # would describe a number nobody is being shown.
+        counted = [s["confidence"] for s in sources if s.get("weight")]
+        return {
+            "ticker": ticker,
+            "confidence": confidence,
+            "action": action_for_confidence(confidence),
+            "confidence_label": label_for_confidence(confidence),
+            "consensus": consensus_for(counted),
+            "horizon_months": self._blended_horizon(sources),
+            # The summary line comes from whichever agent drove the score, and
+            # is attributed so a reader knows which lens they're looking through.
+            "headline": (lead or {}).get("detail", ""),
+            "headline_from": (lead or {}).get("key"),
+            # No blended prose: five agents wrote five arguments from five
+            # different bodies of evidence, and flattening them into one
+            # paragraph would invent a synthesis nobody performed. The detail
+            # card renders them side by side instead.
+            "sources": sources,
+            "wall_street": (street or {}).get(ticker),
+        }
+
+    def _merge_agents(self, votes: list, street: dict = None,
+                      tickers: list = None) -> dict:
+        """Blend the agents' profiles into one scored profile.
+
+        ``votes`` is ``[(agent, model_label, profile), ...]`` in roster order.
+        Suggestions are matched by ticker; the headline number is the weighted
+        average of the agents that scored it, and each agent is recorded in
+        ``sources`` so the UI can show the whole breakdown.
+
+        Anchoring to ``tickers`` — the stocks actually owned or watched — rather
+        than to the union of what the agents returned drops invented symbols: an
+        agent that answers for "HIMSS" when you hold "HIMS" would otherwise add
+        a phantom position to the panel.
+        """
+        street = street or {}
+        by_agent = {
+            agent.key: {s["ticker"]: s for s in profile["suggestions"] if s["ticker"]}
+            for agent, _, profile in votes
+        }
+
+        if tickers:
+            ordered_tickers = [
+                t for t in tickers if any(t in seen for seen in by_agent.values())
+            ]
         else:
-            tickers = []
-            for label, _ in ordered:
-                for ticker in by_model[label]:
-                    if ticker not in tickers:
-                        tickers.append(ticker)
+            ordered_tickers = []
+            for agent, _, _ in votes:
+                for ticker in by_agent[agent.key]:
+                    if ticker not in ordered_tickers:
+                        ordered_tickers.append(ticker)
 
         merged, scores = [], []
         tally = {"agree": 0, "mixed": 0, "split": 0, "single": 0}
-        for ticker in tickers:
-            model_votes = [
-                (label, by_model[label][ticker])
-                for label, _ in ordered
-                if ticker in by_model[label]
-            ]
-            lead = model_votes[0][1]
-
+        for ticker in ordered_tickers:
             sources = [
-                {
-                    "kind": "model",
-                    "name": label,
-                    "confidence": s["confidence"],
-                    "action": s["action"],
-                    "label": label_for_confidence(s["confidence"]),
-                    "weight": self._model_weight(label),
-                    "detail": s["headline"],
-                }
-                for label, s in model_votes
+                self._source_from(agent, label, by_agent[agent.key][ticker])
+                for agent, label, _ in votes
+                if ticker in by_agent[agent.key]
             ]
-
-            # The blended score is the call; the action label follows from it.
-            confidence = blend_confidence(sources)
-            if confidence is None:
-                confidence = NEUTRAL_CONFIDENCE
-
-            # How far apart the two models landed, having read the same evidence.
-            consensus = consensus_for([s["confidence"] for s in sources])
-            tally[consensus] += 1
-
-            scores.append(confidence)
-            merged.append(
-                {
-                    **lead,
-                    "confidence": confidence,
-                    "action": action_for_confidence(confidence),
-                    "confidence_label": label_for_confidence(confidence),
-                    "consensus": consensus,
-                    "sources": sources,
-                    # Evidence, not a vote — see the docstring.
-                    "wall_street": street.get(ticker),
-                }
-            )
+            suggestion = self._blend(ticker, sources, street)
+            tally[suggestion["consensus"]] += 1
+            scores.append(suggestion["confidence"])
+            merged.append(suggestion)
 
         return {
-            "portfolio_note": lead_profile.get("portfolio_note") or "",
+            # Each agent wrote a note on the whole list from its own dimension.
+            # Keeping all of them beats picking one and calling it the summary.
+            "portfolio_notes": [
+                {
+                    "key": agent.key,
+                    "name": agent.name,
+                    "short": agent.short,
+                    "note": profile.get("portfolio_note") or "",
+                }
+                for agent, _, profile in votes
+                if (profile.get("portfolio_note") or "").strip()
+            ],
             "suggestions": merged,
-            "models": [label for label, _ in ordered],
+            "agents": [
+                {"key": agent.key, "name": agent.name, "short": agent.short,
+                 "model": label}
+                for agent, label, _ in votes
+            ],
+            # Kept for the status line and older saved data.
+            "models": sorted({label for _, label, _ in votes}),
             "avg_confidence": round(sum(scores) / len(scores), 1) if scores else None,
             "agreement": {
                 "agreed": tally["agree"],
@@ -1675,55 +2015,83 @@ class AIAdvisorService:
             },
         }
 
-    def _merge_wishlist(self, w_ordered: list, street: dict,
+    @staticmethod
+    def _empty_profile(votes: list) -> dict:
+        """A holdings profile with nothing in it, for when only the wishlist
+        answered (or there are no holdings to score)."""
+        return {
+            "portfolio_notes": [],
+            "suggestions": [],
+            "agents": [
+                {"key": agent.key, "name": agent.name, "short": agent.short,
+                 "model": label}
+                for agent, label, _ in votes
+            ],
+            "models": sorted({label for _, label, _ in votes}),
+            "avg_confidence": None,
+            "agreement": {"agreed": 0, "mixed": 0, "split": 0, "total": 0},
+        }
+
+    def _merge_wishlist(self, votes: list, street: dict,
                         wishlist_tickers: list) -> dict:
         """Blend the wishlist calls, then keep only the names worth buying now.
 
         Same blend as the holdings profile, but the output is deliberately
-        lossy: a watchlist name only survives if the models landed on ``buy``
-        with real conviction behind it. Everything in the wait band is dropped,
-        so an empty ``suggestions`` list is the normal case and the UI hides
-        the section rather than showing a wall of "not yet".
+        lossy: a watchlist name only survives if the agents' average landed on
+        ``buy`` with real conviction behind it. Everything in the wait band is
+        dropped, so an empty ``suggestions`` list is the normal case and the UI
+        hides the section rather than showing a wall of "not yet".
 
-        The panel's counters describe the kept buys, not the whole watchlist —
-        an average taken over names nobody suggested buying would be noise.
+        The full blended list is kept as ``candidates`` even so, because the
+        weights are adjustable: raise the statistics agent and a name that was
+        just under the line has to be able to come back, which it can't if the
+        losers were thrown away at generation time.
         """
-        empty = {
-            "portfolio_note": "",
-            "suggestions": [],
-            "models": [label for label, _ in w_ordered],
-            "avg_confidence": None,
-            "agreement": {"agreed": 0, "mixed": 0, "split": 0, "total": 0},
-        }
-        if not w_ordered:
-            return empty
+        if not votes:
+            return {
+                "portfolio_notes": [],
+                "suggestions": [],
+                "candidates": [],
+                "agents": [],
+                "models": [],
+                "avg_confidence": None,
+                "agreement": {"agreed": 0, "mixed": 0, "split": 0, "total": 0},
+            }
 
-        blended = self._merge_profiles(w_ordered, street, wishlist_tickers)
+        blended = self._merge_agents(votes, street, wishlist_tickers)
+        return self._filter_wishlist(
+            {**blended, "candidates": blended["suggestions"]}
+        )
+
+    @staticmethod
+    def _filter_wishlist(profile: dict) -> dict:
+        """Keep only the genuine buys, and recount the panel around them.
+
+        The counters describe the kept buys, not the whole watchlist — an
+        average taken over names nobody suggested buying would be noise. Reads
+        from ``candidates`` so it can be re-run after a weight change.
+        """
+        candidates = profile.get("candidates") or profile.get("suggestions") or []
         buys = sorted(
             (
                 s
-                for s in blended["suggestions"]
+                for s in candidates
                 if s.get("action") == "buy"
                 and (s.get("confidence") or 0) >= _WISHLIST_MIN_CONFIDENCE
             ),
             key=lambda s: s.get("confidence") or 0,
             reverse=True,
         )
-        empty["models"] = blended.get("models", [])
-        if not buys:
-            return empty
-
         tally = {"agree": 0, "mixed": 0, "split": 0, "single": 0}
         for s in buys:
-            tally[s.get("consensus") or "single"] = (
-                tally.get(s.get("consensus") or "single", 0) + 1
-            )
+            key = s.get("consensus") or "single"
+            tally[key] = tally.get(key, 0) + 1
         scores = [s["confidence"] for s in buys]
         return {
-            "portfolio_note": blended.get("portfolio_note") or "",
+            **profile,
+            "candidates": candidates,
             "suggestions": buys,
-            "models": blended.get("models", []),
-            "avg_confidence": round(sum(scores) / len(scores), 1),
+            "avg_confidence": round(sum(scores) / len(scores), 1) if scores else None,
             "agreement": {
                 "agreed": tally["agree"],
                 "mixed": tally["mixed"],
@@ -1732,8 +2100,76 @@ class AIAdvisorService:
             },
         }
 
+    # --- re-blending (no model calls) -----------------------------------
+
+    def _reblend_profile(self, profile: dict) -> dict:
+        """Recompute a cached profile's scores under the current weights."""
+        if not isinstance(profile, dict):
+            return profile
+        out = {**profile, "suggestions": self._reblend_all(profile.get("suggestions"))}
+        scores = [
+            s["confidence"] for s in out["suggestions"] if s.get("confidence") is not None
+        ]
+        tally = {"agree": 0, "mixed": 0, "split": 0, "single": 0}
+        for s in out["suggestions"]:
+            key = s.get("consensus") or "single"
+            tally[key] = tally.get(key, 0) + 1
+        out["avg_confidence"] = round(sum(scores) / len(scores), 1) if scores else None
+        out["agreement"] = {
+            "agreed": tally["agree"],
+            "mixed": tally["mixed"],
+            "split": tally["split"],
+            "total": len(out["suggestions"]),
+        }
+
+        wishlist = profile.get("wishlist")
+        if isinstance(wishlist, dict):
+            candidates = self._reblend_all(
+                wishlist.get("candidates") or wishlist.get("suggestions")
+            )
+            out["wishlist"] = self._filter_wishlist(
+                {**wishlist, "candidates": candidates}
+            )
+        return out
+
+    def _reblend_all(self, suggestions) -> list:
+        return [self._reblend_one(s) for s in (suggestions or [])]
+
+    def _reblend_one(self, suggestion: dict) -> dict:
+        """Re-average one suggestion's agent scores at the current weights.
+
+        Suggestions saved before the five-agent split carry ``kind: "model"``
+        sources with no agent key; there is nothing to reweight there, so they
+        are returned untouched rather than silently rescored against weights
+        that never applied to them.
+        """
+        sources = suggestion.get("sources") or []
+        if not any(s.get("kind") == "agent" for s in sources):
+            return suggestion
+        sources = [
+            {**s, "weight": self._agent_weight(s["key"])}
+            if s.get("kind") == "agent"
+            else s
+            for s in sources
+        ]
+        return {
+            **suggestion,
+            **self._blend(suggestion.get("ticker", ""), sources),
+            # _blend rebuilds the identity fields from scratch; keep the
+            # evidence the card renders alongside them.
+            "wall_street": suggestion.get("wall_street"),
+        }
+
     def _gather_context(self) -> dict:
-        """Assemble everything the model needs from the existing services."""
+        """Assemble the superset of evidence, once, for all five agents.
+
+        Note what this method is *not*: it is not a prompt. Every field is
+        gathered here and each agent then takes only its own slice in
+        ``ai_agents.py``. Fetching once and slicing after keeps a ticker's news,
+        fundamentals and ratings to one network round-trip apiece however many
+        agents end up reading them — which is what makes five agents cost five
+        LLM calls rather than five times the data fetching.
+        """
         holdings = self.market.holdings_view()
         summary = self.summary.summary()
 
@@ -1747,12 +2183,12 @@ class AIAdvisorService:
         tickers = [h["ticker"] for h in holdings]
         news = self.news.get_news_many(tickers)
         fundamentals = self._gather_fundamentals(tickers)
-        # The street's research goes into the prompt as evidence. Both models
-        # read it and decide for themselves what it's worth.
         street = self._gather_analysts(tickers)
+        history = self._gather_history(tickers)
+        sales = self._gather_sales()
 
         # Wishlist: stocks you don't own yet but watch. Same data sources,
-        # separate list so the models can score entry timing.
+        # separate list so the agents can score entry timing.
         wishlist_entries = []
         wishlist_tickers = []
         if self.wishlist is not None:
@@ -1764,6 +2200,7 @@ class AIAdvisorService:
             w_news = self.news.get_news_many(wishlist_tickers)
             w_fundamentals = self._gather_fundamentals(wishlist_tickers)
             w_street = self._gather_analysts(wishlist_tickers)
+            w_history = self._gather_history(wishlist_tickers)
             # Live prices for the wishlist — prefer the market provider directly.
             w_quotes = {}
             w_earnings = {}
@@ -1793,6 +2230,7 @@ class AIAdvisorService:
                     "fundamentals": w_fundamentals.get(ticker),
                     "wall_street": w_street.get(ticker),
                     "recent_news": w_news.get(ticker, []),
+                    "history": w_history.get(ticker),
                 })
 
         return {
@@ -1800,6 +2238,8 @@ class AIAdvisorService:
             "total_worth": summary.get("total_worth"),
             "realized_gains": summary.get("realized"),
             "unrealized_gains_history": unrealized,
+            # Market-wide, deliberately company-free: the macro agent's slice.
+            "macro_news": self._gather_macro_news(),
             "holdings": [
                 {
                     "ticker": h["ticker"],
@@ -1815,18 +2255,63 @@ class AIAdvisorService:
                     "fundamentals": fundamentals.get(h["ticker"]),
                     "wall_street": street.get(h["ticker"]),
                     "recent_news": news.get(h["ticker"], []),
+                    "history": history.get(h["ticker"]),
+                    "past_sales": sales.get(h["ticker"]),
                 }
                 for h in holdings
             ],
             "wishlist": wishlist_entries,
         }
 
+    def _gather_history(self, tickers) -> dict:
+        """A year of daily closes per ticker, measured into a pattern.
+
+        Returns {ticker: stats-or-None}, and {} if history isn't reachable —
+        the personal agent then has nothing to read and drops out of the
+        average rather than the refresh failing.
+        """
+        provider = getattr(self.market, "provider", None)
+        if provider is None or not tickers:
+            return {}
+        try:
+            daily = provider.get_daily_many(tickers) or {}
+        except Exception as e:
+            print(f"AI advisor: price history unavailable: {e}")
+            return {}
+        return {t: _history_stats(daily.get(t)) for t in tickers}
+
+    def _gather_sales(self) -> dict:
+        """The investor's own past exits, grouped by ticker.
+
+        Only the personal agent sees these. Whether you have sold this name
+        before, and whether it went well, is exactly the kind of pattern that
+        belongs in that agent's dimension and nowhere else.
+        """
+        if self.sales is None:
+            return {}
+        try:
+            records = self.sales.list_sales() or []
+        except Exception:
+            return {}
+        out = {}
+        for sale in records:
+            out.setdefault(sale["ticker"], []).append(
+                {
+                    "date": (sale.get("timestamp") or "")[:10],
+                    "shares": sale.get("shares"),
+                    "sale_price": sale.get("sale_price"),
+                    "cost_basis": sale.get("cost_basis"),
+                    "realized_gain": sale.get("realized_gain"),
+                }
+            )
+        return out
+
     def _gather_fundamentals(self, tickers) -> dict:
         """Company fundamentals per ticker, for the prompt.
 
         Returns {ticker: fundamentals-or-None}, and {} if the source isn't
-        wired in or falls over — the models then reason without them rather
-        than the refresh failing. ``fundamentals_data.py`` guarantees nothing
+        wired in or falls over — the company and statistics agents then have
+        nothing to read and drop out, rather than the refresh failing. ``fundamentals_data.py`` guarantees nothing
         opinion-shaped is in here; a leak raises rather than reaching a prompt.
         """
         if not self.fundamentals_available() or not tickers:
@@ -1837,102 +2322,12 @@ class AIAdvisorService:
             print(f"AI advisor: fundamentals unavailable: {e}")
             return {}
 
-    def _build_prompt(self, context: dict, risk: str) -> str:
-        if risk == "low":
-            stance = (
-                "The investor wants a LOW-RISK stance: prioritise capital "
-                "preservation and steady gains over aggressive upside. Over the "
-                "next quarter, favour durable businesses at defensible "
-                "valuations, trim positions whose fundamentals no longer "
-                "support the multiple, and only suggest buying more when the "
-                "risk/reward is clearly favourable. Volatility alone is not a "
-                "reason to sell a sound position — deteriorating fundamentals "
-                "or a stretched valuation is."
-            )
-        else:
-            stance = (
-                "The investor wants a HIGH-RISK stance: prioritise maximising "
-                "gains and is comfortable with volatility. Over the next "
-                "quarter, be willing to buy weakness and add to conviction "
-                "positions where growth is intact, and only trim or sell when "
-                "the fundamental case is breaking down or the valuation has run "
-                "far ahead of the business."
-            )
-        # Holdings prompt should not carry wishlist payload — keeps tokens low
-        # and prevents the model from mixing the two jobs.
-        holdings_context = {k: v for k, v in context.items() if k != "wishlist"}
-        return (
-            f"{stance}\n\n"
-            "Here is the current portfolio and market context as JSON. All "
-            "monetary values are in the position's currency; gains are shown as "
-            "{value, pct}. 'unrealized_gains_history' shows the accrued gain over "
-            "each window so you can read momentum. Each holding's 'fundamentals' "
-            "block carries trailing valuation, margins, growth, balance-sheet and "
-            "price-range figures — every field ending in '_pct' is already a "
-            "percentage. The 'wall_street' block is the sell-side research: "
-            "weigh it as evidence against everything else, per the standards in "
-            "your instructions. A missing field or block simply wasn't reported; "
-            "don't guess at it.\n\n"
-            f"{json.dumps(holdings_context, indent=2, default=str)}\n\n"
-            "Return one suggestion per holding. 'confidence' is your 0-100 "
-            "score (100 = buy hard, 50 = hold, 0 = sell out). 'action' is the "
-            "matching label — one of buy (buy more), hold, trim (sell part), "
-            "sell (sell the whole position). 'horizon_months' must be 1, 2 or 3 "
-            "— the number of months you expect the call to play out over. "
-            "'headline' is the one-line summary; "
-            "'reasoning' is the ~10-line explanation — and it must state what "
-            "you made of the Wall Street view, whether you sided with it or "
-            "against it; 'price_trigger' is a concrete price-based action for "
-            "the period (empty string if none); 'risks' names the main risk to "
-            "this call."
-        )
-
-    def _build_wishlist_prompt(self, context: dict, risk: str) -> str:
-        if risk == "low":
-            stance = (
-                "The investor wants a LOW-RISK stance for NEW ENTRIES: only flag "
-                "clear risk/reward with durable business at defensible valuation. "
-                "Be selective — a wishlist name must earn a buy with business quality "
-                "and entry price that compensate for being a new, concentrated bet."
-            )
-        else:
-            stance = (
-                "The investor wants a HIGH-RISK stance for NEW ENTRIES: willing to "
-                "enter on weakness where growth is intact and the setup is timely. "
-                "You may flag momentum breakouts or oversold quality if the "
-                "risk/reward is there, but still ground timing in valuation and "
-                "fundamentals — not just a hot headline."
-            )
-        # Minimal wishlist payload — keep tokens low since we only need entry timing.
-        wishlist_payload = {
-            "as_of": context.get("as_of"),
-            "wishlist": context.get("wishlist", []),
-        }
-        return (
-            f"{stance}\n\n"
-            "Here is the current watchlist context as JSON. Each entry's "
-            "'fundamentals' block carries trailing valuation, margins, growth, "
-            "balance-sheet and price-range figures (fields ending in '_pct' are "
-            "percent). The 'wall_street' block is sell-side research: weigh it as "
-            "evidence per the standards in your instructions. A missing field simply "
-            "wasn't reported; don't guess at it.\n\n"
-            f"{json.dumps(wishlist_payload, indent=2, default=str)}\n\n"
-            "Return one suggestion per watchlist ticker. 'confidence' is your 0-100 "
-            "score (100 = buy now, 50 = wait, 0 = avoid). 'action' is the matching "
-            "label — 'buy' means buy now, 'hold' means wait; trim/sell both mean wait. "
-            "'horizon_months' must be 1, 2 or 3 — months you expect the entry to "
-            "pay off over. 'headline' is the one-line summary; 'reasoning' is the "
-            "~6-10 line explanation grounded in valuation, margins/growth, earnings "
-            "date, and headlines; 'price_trigger' is a concrete entry trigger "
-            "(empty if none); 'risks' names the main risk to this entry."
-        )
-
     @staticmethod
     def _clean_profile(result: dict) -> dict:
-        """Clamp horizons to the 1-7 day window, normalise each model's
+        """Clamp horizons to the 1-3 month window, normalise the agent's
         confidence onto the 0-100 scale, and tidy shapes.
 
-        A model that answers with an action but no usable score still counts:
+        An agent that answers with an action but no usable score still counts:
         its action is mapped back onto the scale. A score with no action gets
         the action its score implies. Only when both are missing do we fall
         back to neutral.
@@ -1987,6 +2382,20 @@ class AIAdvisorService:
             self.storage.save({"latest": latest})
         except Exception as e:
             print(f"AI advisor: could not persist suggestions: {e}")
+
+    def _persist_weights(self):
+        """Save the agent weights for the active portfolio.
+
+        Weights live in their own file rather than inside the suggestions
+        blob: they outlive any particular refresh, and a failed generation
+        must not be able to reset how much you trust each agent.
+        """
+        if self.weights_storage is None:
+            return
+        try:
+            self.weights_storage.save({"weights": dict(self.weights)})
+        except Exception as e:
+            print(f"AI advisor: could not persist agent weights: {e}")
 
     def _generated_at_epoch(self):
         if not self._latest or not self._latest.get("generated_at"):

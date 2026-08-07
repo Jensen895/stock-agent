@@ -1,10 +1,11 @@
 """Analyst data provider — what the big financial firms say, as evidence.
 
-This is **testimony, not a vote**. The advisor's score comes from two AI models
-and nothing else; this module hands those models the sell-side research —
-Goldman Sachs, JP Morgan, Morgan Stanley, Wells Fargo and the rest — as one more
-input to weigh alongside fundamentals, momentum and news. Each model reads it,
-argues with it if it wants, and reaches its own number.
+This is **testimony, not a vote**. It is the entire evidence base of one of the
+five agents in ``ai_agents.py`` — the Wall Street agent — and no other agent
+sees it. That agent reads the sell-side research (Goldman Sachs, JP Morgan,
+Morgan Stanley, Wells Fargo and the rest), argues with it if it wants, and
+produces one 0-100 score, which is then averaged with the four agents that read
+entirely different things.
 
 That is a deliberate change from an earlier design in which the street was
 averaged in as a third score. Mechanical averaging turned out to be the wrong
@@ -49,7 +50,7 @@ numbers and the sentence.
 
 Ratings move on the timescale of research notes, not quotes, so results are
 cached for six hours. Everything degrades gracefully: any failure yields None
-and the models simply reason without the street's view.
+and the Wall Street agent simply drops out of the average.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -128,8 +129,8 @@ class YahooAnalystProvider:
     def get_ratings(self, ticker: str):
         """Return the street's view of one ticker, or None if nobody covers it.
 
-        No score: this is evidence for the models to weigh, not a vote to be
-        averaged. Shape::
+        No score: this is evidence for the Wall Street agent to weigh, not a
+        vote to be averaged. Shape::
 
             {"ticker",
              "rating", "mean",           # Yahoo's key + the 1-5 consensus
@@ -178,7 +179,7 @@ class YahooAnalystProvider:
 
         analyst_count = int(count) if count else sum(distribution.values())
         if not analyst_count and mean is None:
-            return None  # covered by nobody — the models just won't see a view
+            return None  # covered by nobody — the WS agent has no view to report
 
         price = _raw(financial.get("currentPrice"))
         target = self._target(financial, price)
