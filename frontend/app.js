@@ -292,28 +292,27 @@ async function loadStocks() {
     const data = await res.json();
     renderStocks(data.stocks || []);
   } catch {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty">Could not reach the API.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">Could not reach the API.</td></tr>`;
   }
 }
 
 function renderStocks(stocks) {
   if (!stocks.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty">No stocks yet. Buy one above.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">No stocks yet. Buy one above.</td></tr>`;
     return;
   }
   tbody.innerHTML = stocks
     .map((s) => {
       const ticker = escapeHtml(s.ticker);
-      const price = s.price == null ? "—" : `$${fmt(s.price)}`;
       return `<tr>
-        <td>${ticker}</td>
+        ${tickerCell(ticker, s.name)}
         <td class="num">${fmt(s.shares)}</td>
         <td class="num">$${fmt(s.avg_price)}</td>
-        <td class="num">${price}</td>
-        ${gainCell(s.today)}
+        ${priceCell(s.price, s.today)}
         ${gainCell(s.total)}
-        <td class="num earnings">${fmtEarnings(s.earnings_date)}</td>
+        ${earningsCell(s.earnings)}
         <td class="actions-col">
+          <button class="link-btn" data-buy="${ticker}">Buy</button>
           <button class="link-btn" data-sell="${ticker}">Sell</button>
           <button class="link-btn danger" data-delete="${ticker}">Delete</button>
         </td>
@@ -333,8 +332,83 @@ function gainCell(g) {
   return `<td class="num ${cls}">${sign}$${fmt(Math.abs(v))}${pct}</td>`;
 }
 
+// --- two-line cells ---------------------------------------------------
+//
+// Three pairs of figures get read together — a ticker and its company, a price
+// and today's move, an earnings date and what the company reported — so each
+// pair shares one cell, the second line small and quiet under the first. That
+// keeps these tables to a width that fits beside the AI column.
+
+// The symbol, with the company's full name underneath. Long names are clipped
+// with an ellipsis and carry the whole thing as a tooltip. `ticker` arrives
+// already escaped; `name` is escaped here.
+function tickerCell(ticker, name) {
+  const full = name ? escapeHtml(name) : "";
+  const sub = full ? `<span class="co-name" title="${full}">${full}</span>` : "";
+  return `<td><div class="cell-stack">
+    <span class="cell-main">${ticker}</span>${sub}
+  </div></td>`;
+}
+
+// The live price, with today's move as a small colored tag below it.
+function priceCell(price, gain) {
+  const main = price == null ? "—" : `$${fmt(price)}`;
+  return `<td class="num"><div class="cell-stack">
+    <span class="cell-main">${main}</span>${dayTag(gain)}
+  </div></td>`;
+}
+
+// The move tag itself: "+$12.34 (+1.2%)". Empty when there's no quote to
+// compare against — the price above it is already showing an em dash.
+function dayTag(g) {
+  if (!g || g.value == null) return "";
+  const v = g.value;
+  const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+  const cls = v > 0 ? "pos" : v < 0 ? "neg" : "flat";
+  const pct = g.pct == null ? "" : ` (${sign}${fmt(Math.abs(g.pct))}%)`;
+  return `<span class="day-tag ${cls}">${sign}$${fmt(Math.abs(v))}${pct}</span>`;
+}
+
+// The earnings date, plus — when the company reported within the last week —
+// what it actually earned against what the street expected. A result already
+// in tells you more than a date three months out, so the recent report wins
+// the cell and brings its outcome with it.
+function earningsCell(e) {
+  if (!e || !e.date) return `<td class="num earnings">—</td>`;
+  return `<td class="num earnings"><div class="cell-stack">
+    <span class="cell-main">${fmtEarnings(e.date)}</span>${epsTag(e)}
+  </div></td>`;
+}
+
+// "$2.06 vs $1.85 exp" — green on a beat, red on a miss. Colored by the
+// surprise, not by the EPS itself: a loss narrower than feared is good news.
+function epsTag(e) {
+  if (e.eps_actual == null) return "";
+  const surprise = e.surprise_pct;
+  const cls = surprise > 0 ? "pos" : surprise < 0 ? "neg" : "flat";
+  const versus =
+    e.eps_estimate == null ? "actual" : `vs ${fmtEps(e.eps_estimate)} exp`;
+  return `<span class="eps-tag ${cls}">${fmtEps(e.eps_actual)} ${versus}</span>`;
+}
+
+// Prefill the Buy / Add Stock form with a ticker and jump to it. Shared by the
+// holdings rows (buying more of what you hold) and the wishlist rows.
+function prefillBuy(ticker) {
+  document.getElementById("ticker").value = ticker;
+  setMessage(buyMsg, "", "");
+  buyForm.scrollIntoView({ behavior: "smooth", block: "center" });
+  document.getElementById("shares").focus();
+}
+
 // Row actions — event-delegated so they work on re-rendered rows.
 tbody.addEventListener("click", async (e) => {
+  // Buy: top up an existing position through the Buy / Add Stock form.
+  const buyBtn = e.target.closest("[data-buy]");
+  if (buyBtn) {
+    prefillBuy(buyBtn.getAttribute("data-buy"));
+    return;
+  }
+
   // Sell: prefill the Sell Stock form with this ticker and jump to it.
   const sellBtn = e.target.closest("[data-sell]");
   if (sellBtn) {
@@ -471,30 +545,28 @@ async function loadWishlist() {
     const data = await res.json();
     renderWishlist(data.wishlist || []);
   } catch {
-    wishlistBody.innerHTML = `<tr><td colspan="6" class="empty">Could not reach the API.</td></tr>`;
+    wishlistBody.innerHTML = `<tr><td colspan="5" class="empty">Could not reach the API.</td></tr>`;
   }
 }
 
 function renderWishlist(items) {
   if (!items.length) {
-    wishlistBody.innerHTML = `<tr><td colspan="6" class="empty">Nothing on your wishlist yet.</td></tr>`;
+    wishlistBody.innerHTML = `<tr><td colspan="5" class="empty">Nothing on your wishlist yet.</td></tr>`;
     return;
   }
   wishlistBody.innerHTML = items
     .map((w) => {
       const ticker = escapeHtml(w.ticker);
       const open = w.open == null ? "—" : `$${fmt(w.open)}`;
-      const price = w.price == null ? "—" : `$${fmt(w.price)}`;
-      // Change vs. the open price: green above the open, red below.
-      const change = gainCell(
-        w.change == null ? null : { value: w.change, pct: w.change_pct }
-      );
+      // Change vs. the open price: green above the open, red below. It rides
+      // under the price, the same way today's move does in the holdings table.
+      const change =
+        w.change == null ? null : { value: w.change, pct: w.change_pct };
       return `<tr>
-        <td>${ticker}</td>
+        ${tickerCell(ticker, w.name)}
         <td class="num">${open}</td>
-        <td class="num">${price}</td>
-        ${change}
-        <td class="num earnings">${fmtEarnings(w.earnings_date)}</td>
+        ${priceCell(w.price, change)}
+        ${earningsCell(w.earnings)}
         <td class="actions-col">
           <button class="link-btn" data-buy="${ticker}">Buy</button>
           <button class="link-btn danger" data-remove="${ticker}" title="Remove">Remove</button>
@@ -533,10 +605,7 @@ wishlistBody.addEventListener("click", async (e) => {
   // Buy: prefill the Buy / Add Stock form with this ticker and jump to it.
   const buyBtn = e.target.closest("[data-buy]");
   if (buyBtn) {
-    document.getElementById("ticker").value = buyBtn.getAttribute("data-buy");
-    setMessage(buyMsg, "", "");
-    buyForm.scrollIntoView({ behavior: "smooth", block: "center" });
-    document.getElementById("shares").focus();
+    prefillBuy(buyBtn.getAttribute("data-buy"));
     return;
   }
 
@@ -623,6 +692,11 @@ function fmtTime(iso, intervalKey) {
     day: "numeric",
     year: "numeric",
   });
+}
+
+// An EPS figure: "$2.06", or "−$0.10" for a loss.
+function fmtEps(v) {
+  return `${v < 0 ? "−" : ""}$${fmt(Math.abs(v))}`;
 }
 
 // Format an earnings date ("YYYY-MM-DD") as "Aug 15, 2026". Em dash if unknown.

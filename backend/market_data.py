@@ -9,11 +9,13 @@ Source: Yahoo Finance's public (unofficial) endpoints, reached with the Python
 standard library only — no third-party packages, matching the rest of the app.
 
   - chart   (v8/finance/chart)         -> current price, previous close, the
-                                          day's open, and the price history that
-                                          drives the unrealized-gains graph.
+                                          day's open, the company's full name,
+                                          and the price history that drives the
+                                          unrealized-gains graph.
   - crumb   (v1/test/getcrumb)         -> a token, obtained via a cookie, that
                                           the quoteSummary endpoint now requires.
-  - summary (v10/finance/quoteSummary) -> the next scheduled earnings date, and
+  - summary (v10/finance/quoteSummary) -> the earnings calendar and the
+                                          actual-vs-expected EPS history, and
                                           (for ``analyst_data.py``) the Wall
                                           Street ratings modules.
 
@@ -60,6 +62,32 @@ _TTL_SUMMARY = 21600      # seconds (6h) — default for other quoteSummary modu
 # Fetch this much daily history for the long-horizon ("total") graph.
 _TOTAL_RANGE = "1y"
 
+# A report this fresh is worth more than the next scheduled date: right after a
+# company reports, what it actually earned says more than a date three months
+# out. Inside this window the Earnings column shows the report just delivered,
+# with its result, instead of the next one.
+_RECENT_REPORT_DAYS = 7
+
+# Yahoo's earnings *history* can lag its calendar by a day or two after a
+# report. Only pair a recent report with a history row whose fiscal quarter
+# plausibly precedes it, so last quarter's numbers are never captioned as this
+# week's result.
+_MAX_QUARTER_LAG_DAYS = 120
+
+
+def _number(value):
+    """Unwrap a Yahoo number ({"raw": 1.23, "fmt": "1.23"}) as a float, or None
+    when it's missing or not a number."""
+    if isinstance(value, dict):
+        value = value.get("raw")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:  # NaN
+        return None
+    return round(number, 4)
+
 
 class MarketDataProvider:
     def __init__(self, timeout=8, max_retries=3, max_workers=8):
@@ -83,8 +111,13 @@ class MarketDataProvider:
     # --- public API -----------------------------------------------------
 
     def get_quote(self, ticker: str):
-        """Return {price, open, previous_close, currency} for one ticker, or
-        None if it can't be fetched."""
+        """Return {price, open, previous_close, currency, name} for one ticker,
+        or None if it can't be fetched.
+
+        ``name`` is the company's full name ("Apple Inc."). It rides along on
+        the chart response the price already comes from, so naming a holding
+        costs no extra request.
+        """
         chart = self._chart(ticker, rng="1d", interval="1m", ttl=_TTL_INTRADAY)
         if not chart or chart.get("price") is None:
             return None
@@ -93,6 +126,7 @@ class MarketDataProvider:
             "open": chart["open"],
             "previous_close": chart["previous_close"],
             "currency": chart["currency"],
+            "name": chart["name"],
         }
 
     def get_quotes(self, tickers) -> dict:
@@ -123,17 +157,36 @@ class MarketDataProvider:
         Returns {ticker: [(ts_ms, close), ...]}."""
         return self._parallel(self.get_daily_series, tickers)
 
-    def get_earnings_date(self, ticker: str):
-        """Return the next (or most recent upcoming) earnings date as an ISO
-        date string 'YYYY-MM-DD', or None if unknown."""
+    def get_earnings_info(self, ticker: str):
+        """Return what's worth knowing about this ticker's earnings, or None:
+
+            {"date": "YYYY-MM-DD", "reported": bool,
+             "eps_actual": float, "eps_estimate": float, "surprise_pct": float}
+
+        Usually ``date`` is the next scheduled report and ``reported`` is False.
+        When the company reported within the last week, that date is returned
+        instead with ``reported`` True and the quarter's actual-vs-expected EPS
+        attached — a result just in beats a date months away. The EPS keys are
+        absent when Yahoo hasn't published the numbers yet.
+        """
         cache_key = ("earnings", ticker.upper())
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached or None  # cached "" means "looked up, none found"
 
-        value = self._fetch_earnings_date(ticker)
+        value = self._fetch_earnings_info(ticker)
         self._cache_set(cache_key, value or "", _TTL_EARNINGS)
         return value
+
+    def get_earnings_infos(self, tickers) -> dict:
+        """Fetch several earnings entries concurrently. {ticker: info-or-None}."""
+        return self._parallel(self.get_earnings_info, tickers)
+
+    def get_earnings_date(self, ticker: str):
+        """Just the date from ``get_earnings_info`` — an ISO 'YYYY-MM-DD'
+        string, or None if unknown."""
+        info = self.get_earnings_info(ticker)
+        return info["date"] if info else None
 
     def get_earnings_dates(self, tickers) -> dict:
         """Fetch several earnings dates concurrently. {ticker: iso-date-or-None}."""
@@ -249,37 +302,96 @@ class MarketDataProvider:
                 float(previous_close) if previous_close is not None else None
             ),
             "currency": meta.get("currency"),
+            # longName is the full legal-ish name ("Apple Inc."); shortName is
+            # the exchange's abbreviation, which is all some symbols carry.
+            "name": meta.get("longName") or meta.get("shortName"),
             "series": series,
         }
 
     # --- earnings fetch -------------------------------------------------
 
-    def _fetch_earnings_date(self, ticker: str):
+    def _fetch_earnings_info(self, ticker: str):
         result = self.fetch_quote_summary(
-            ticker, ["calendarEvents"], ttl=_TTL_EARNINGS
+            ticker, ["calendarEvents", "earningsHistory"], ttl=_TTL_EARNINGS
         )
         if not result:
             return None
         try:
-            raw_dates = result["calendarEvents"]["earnings"].get("earningsDate") or []
+            earnings = result["calendarEvents"]["earnings"] or {}
         except (KeyError, TypeError):
             return None
-        return self._pick_upcoming(raw_dates)
 
-    @staticmethod
-    def _pick_upcoming(raw_dates):
-        """Yahoo gives earningsDate as one or two {"raw": <unix>} entries (a
-        single day or an estimated window). Pick the soonest date that is still
-        in the future; otherwise the latest known date."""
+        # Take both date fields as candidates. Yahoo rolls ``earningsDate``
+        # forward to the next quarter the moment a company reports, and leaves
+        # ``earningsCallDate`` sitting on the call just held — so the pair is
+        # what tells us a report has only just happened.
         stamps = sorted(
-            d["raw"] for d in raw_dates if isinstance(d, dict) and d.get("raw")
+            set(
+                self._stamps(earnings.get("earningsDate"))
+                + self._stamps(earnings.get("earningsCallDate"))
+            )
         )
         if not stamps:
             return None
+
         now = time.time()
+        latest_past = max((s for s in stamps if s < now), default=None)
         upcoming = next((s for s in stamps if s >= now), None)
+
+        if latest_past is not None and now - latest_past <= _RECENT_REPORT_DAYS * 86400:
+            info = {"date": self._iso_date(latest_past), "reported": True}
+            info.update(self._last_result(result, latest_past))
+            return info
+
         chosen = upcoming if upcoming is not None else stamps[-1]
-        return datetime.fromtimestamp(chosen, tz=timezone.utc).strftime("%Y-%m-%d")
+        return {"date": self._iso_date(chosen), "reported": chosen < now}
+
+    @staticmethod
+    def _stamps(raw_dates):
+        """Unix timestamps out of a Yahoo date list — one or two {"raw": <unix>}
+        entries (a single day, or an estimated window)."""
+        return [
+            d["raw"]
+            for d in (raw_dates or [])
+            if isinstance(d, dict) and d.get("raw")
+        ]
+
+    @staticmethod
+    def _iso_date(stamp):
+        return datetime.fromtimestamp(stamp, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _last_result(result: dict, reported_at: float) -> dict:
+        """Actual vs. expected EPS for the quarter just reported, as
+        {eps_actual, eps_estimate, surprise_pct}. Empty when Yahoo's history
+        hasn't caught up with the calendar."""
+        history = (result.get("earningsHistory") or {}).get("history") or []
+        for item in reversed(history):
+            if not isinstance(item, dict):
+                continue
+            quarter = item.get("quarter")
+            end = quarter.get("raw") if isinstance(quarter, dict) else None
+            # The quarter has to end before the report and not long before it;
+            # anything older is a row Yahoo simply hasn't replaced yet.
+            if end is None or not 0 <= reported_at - end <= _MAX_QUARTER_LAG_DAYS * 86400:
+                continue
+            actual = _number(item.get("epsActual"))
+            if actual is None:
+                continue
+            estimate = _number(item.get("epsEstimate"))
+            out = {"eps_actual": actual}
+            if estimate is not None:
+                out["eps_estimate"] = estimate
+            # Yahoo's surprisePercent is a fraction (0.0674 = a 6.74% beat).
+            surprise = _number(item.get("surprisePercent"))
+            if surprise is not None:
+                out["surprise_pct"] = round(surprise * 100, 2)
+            elif estimate:
+                out["surprise_pct"] = round(
+                    (actual - estimate) / abs(estimate) * 100, 2
+                )
+            return out
+        return {}
 
     def _get_crumb(self):
         """Lazily obtain (and cache) the crumb quoteSummary requires. Seeds a

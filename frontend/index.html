@@ -140,23 +140,24 @@
         <h2>Your Stocks</h2>
         <button id="refresh" class="secondary" type="button">Refresh</button>
       </div>
+      <div class="table-wrap">
       <table id="stocks-table">
         <thead>
           <tr>
             <th>Ticker</th>
             <th class="num">Shares</th>
             <th class="num">Avg Price</th>
-            <th class="num">Price</th>
-            <th class="num">Today</th>
+            <th class="num" title="Live price, with today's move tagged underneath">Price</th>
             <th class="num">Total</th>
-            <th class="num">Earnings</th>
+            <th class="num" title="The next scheduled report — or, if the company reported this past week, that date with what it actually earned against what was expected">Earnings</th>
             <th class="actions-col"></th>
           </tr>
         </thead>
         <tbody id="stocks-body">
-          <tr><td colspan="8" class="empty">Loading…</td></tr>
+          <tr><td colspan="7" class="empty">Loading…</td></tr>
         </tbody>
       </table>
+      </div>
     </section>
 
     <!-- WISHLIST (write + read) -->
@@ -165,7 +166,8 @@
         <h2>⭐ Wishlist</h2>
       </div>
       <p class="hint">Stocks you don't own yet but plan to buy. Shows today's
-        open and the live price — green when above the open, red when below.</p>
+        open and the live price, with the move since the open tagged under it —
+        green when above the open, red when below.</p>
       <form id="wishlist-form" class="inline-form" autocomplete="off">
         <div class="field">
           <label for="wishlist-ticker">Ticker</label>
@@ -174,21 +176,22 @@
         <button type="submit">Add to Wishlist</button>
       </form>
       <p id="wishlist-message" class="message" role="status"></p>
+      <div class="table-wrap">
       <table id="wishlist-table">
         <thead>
           <tr>
             <th>Ticker</th>
             <th class="num">Open</th>
-            <th class="num">Price</th>
-            <th class="num">Change</th>
-            <th class="num">Earnings</th>
+            <th class="num" title="Live price, with the change since the open tagged underneath">Price</th>
+            <th class="num" title="The next scheduled report — or, if the company reported this past week, that date with what it actually earned against what was expected">Earnings</th>
             <th class="actions-col"></th>
           </tr>
         </thead>
         <tbody id="wishlist-body">
-          <tr><td colspan="6" class="empty">Loading…</td></tr>
+          <tr><td colspan="5" class="empty">Loading…</td></tr>
         </tbody>
       </table>
+      </div>
     </section>
 
     </div><!-- /.main-col -->

@@ -376,23 +376,32 @@ class MarketService:
         self.portfolio = portfolio
 
     def holdings_view(self) -> list:
-        """Holdings enriched with live price, today's and total unrealized gain
-        (value + %), market value, and the next earnings date."""
+        """Holdings enriched with the company name, live price, today's and
+        total unrealized gain (value + %), market value, and earnings.
+
+        ``earnings`` is the whole entry from the provider (the date, whether it
+        has been reported, and the result if it landed this past week);
+        ``earnings_date`` repeats just the date, which is all the AI agents
+        take.
+        """
         positions = self.portfolio.list_stocks()
         tickers = [p["ticker"] for p in positions]
         quotes = self.provider.get_quotes(tickers)
-        earnings = self.provider.get_earnings_dates(tickers)
+        earnings = self.provider.get_earnings_infos(tickers)
 
         rows = []
         for p in positions:
             ticker, shares, avg = p["ticker"], p["shares"], p["avg_price"]
             quote = quotes.get(ticker)
+            entry = earnings.get(ticker)
             row = {
                 "ticker": ticker,
+                "name": None,
                 "shares": shares,
                 "avg_price": avg,
                 "cost_basis": round(shares * avg, 2),
-                "earnings_date": earnings.get(ticker),
+                "earnings": entry,
+                "earnings_date": entry["date"] if entry else None,
                 "price": None,
                 "previous_close": None,
                 "market_value": None,
@@ -404,6 +413,7 @@ class MarketService:
                 price = quote["price"]
                 prev = quote.get("previous_close")
                 row.update(
+                    name=quote.get("name"),
                     price=round(price, 4),
                     previous_close=round(prev, 4) if prev else None,
                     market_value=round(price * shares, 2),
@@ -415,28 +425,32 @@ class MarketService:
         return rows
 
     def wishlist_view(self, tickers) -> list:
-        """Wishlist tickers enriched with today's open, the live price, the
-        change vs. the open (value + %), and the next earnings date."""
+        """Wishlist tickers enriched with the company name, today's open, the
+        live price, the change vs. the open (value + %), and earnings (same
+        shape as ``holdings_view``)."""
         tickers = list(tickers)
         quotes = self.provider.get_quotes(tickers)
-        earnings = self.provider.get_earnings_dates(tickers)
+        earnings = self.provider.get_earnings_infos(tickers)
 
         rows = []
         for ticker in tickers:
             quote = quotes.get(ticker)
+            entry = earnings.get(ticker)
             row = {
                 "ticker": ticker,
+                "name": None,
                 "open": None,
                 "price": None,
                 "change": None,
                 "change_pct": None,
-                "earnings_date": earnings.get(ticker),
+                "earnings": entry,
+                "earnings_date": entry["date"] if entry else None,
                 "quote_ok": False,
             }
             if quote and quote.get("price") is not None:
                 price = quote["price"]
                 day_open = quote.get("open")
-                row.update(price=round(price, 4), quote_ok=True)
+                row.update(name=quote.get("name"), price=round(price, 4), quote_ok=True)
                 if day_open:
                     row.update(
                         open=round(day_open, 4),

@@ -21,16 +21,18 @@ body {
 }
 
 .container {
-  max-width: 1290px;
+  max-width: 1360px;
   margin: 0 auto;
   padding: 2rem 1.25rem 4rem;
 }
 
 /* Two columns: existing content on the left, AI advisor on the right. The left
-   column keeps its original ~880px width; the AI column sits to its right. */
+   column is 920px — wide enough for the holdings table's seven columns and its
+   three row actions — and the AI column sits to its right at a fixed width.
+   The container is sized to fit both plus the gap without squeezing either. */
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 880px) 370px;
+  grid-template-columns: minmax(0, 920px) 370px;
   gap: 1.5rem;
   justify-content: center;
   align-items: start;
@@ -338,11 +340,56 @@ td.pos { color: var(--ok); }
 td.neg { color: var(--err); }
 td.earnings { color: var(--muted); white-space: nowrap; }
 
+/* TWO-LINE CELLS. Three pairs of figures are read together — a ticker and its
+   company, a price and today's move, an earnings date and what was reported —
+   so each pair shares a cell, the second line small and quiet beneath the
+   first. Two columns' worth of information at one column's width, which is
+   what lets these tables sit beside the AI column without scrolling. */
+.cell-stack { display: flex; flex-direction: column; gap: 0.15rem; }
+td.num .cell-stack { align-items: flex-end; }
+.cell-main { line-height: 1.3; }
+
+/* The company's full name under its ticker. Clipped rather than wrapped: a
+   long name would otherwise set the width of the whole column, and this table
+   has no width to spare. The full name is on the element's tooltip. */
+.co-name {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 400;
+  max-width: 7.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The little tags: today's move under the price, actual-vs-expected EPS under
+   a report date. Tinted rather than plain text so the eye separates them from
+   the figure above at a glance. */
+.day-tag,
+.eps-tag {
+  font-size: 0.7rem;
+  line-height: 1.25;
+  padding: 0.05rem 0.28rem;
+  border-radius: 0.5rem;
+  white-space: nowrap;
+}
+.day-tag.pos,
+.eps-tag.pos { color: var(--ok); background: rgba(74, 222, 128, 0.12); }
+.day-tag.neg,
+.eps-tag.neg { color: var(--err); background: rgba(248, 113, 113, 0.12); }
+.day-tag.flat,
+.eps-tag.flat { color: var(--muted); background: rgba(148, 163, 184, 0.14); }
+
 /* Holdings and wishlist carry many columns — tighten them up so everything
    fits without wrapping. */
 #stocks-table, #wishlist-table { font-size: 0.85rem; }
 #stocks-table th, #stocks-table td,
-#wishlist-table th, #wishlist-table td { padding: 0.5rem 0.4rem; }
+#wishlist-table th, #wishlist-table td { padding: 0.45rem 0.3rem; }
+
+/* A table whose columns can't fit scrolls sideways rather than spilling out
+   past the card — a row of buttons hanging over the AI column is a worse
+   failure than a scrollbar. Normally there's nothing to scroll. */
+.table-wrap { overflow-x: auto; }
 
 .actions-col { text-align: right; width: 1%; white-space: nowrap; }
 
@@ -360,11 +407,16 @@ td.earnings { color: var(--muted); white-space: nowrap; }
 .link-btn.danger { color: var(--err); }
 .link-btn:hover { text-decoration: underline; }
 
+/* Holdings rows carry three actions (Buy / Sell / Delete), so theirs are
+   trimmed tighter than a standalone link button would be. */
+#stocks-table .link-btn,
+#wishlist-table .link-btn { padding: 0.15rem 0.28rem; font-size: 0.8rem; }
+
 /* Below the two-column width, stack the AI advisor under the main content.
    The card's own overrides for this width live with the .ai-card rules below —
    at equal specificity the later block wins, so they have to come after it. */
 @media (max-width: 1180px) {
-  .layout { grid-template-columns: minmax(0, 880px); }
+  .layout { grid-template-columns: minmax(0, 920px); }
 }
 
 @media (max-width: 520px) {
