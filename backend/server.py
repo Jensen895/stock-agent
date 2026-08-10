@@ -24,6 +24,11 @@ Endpoints:
                                summary + per-stock detail, low & high risk,
                                each score broken down by the five agents
   POST   /api/ai/refresh    -> trigger a background regeneration of suggestions
+  GET    /api/discover      -> three trending stocks you neither hold nor watch
+                               (read only) each with why it's being talked
+                               about, what the company is, and the same
+                               five-agent confidence score as everything else
+  POST   /api/discover/refresh -> trigger a background regeneration of picks
   POST   /api/ai/weights    -> set how much each AI agent counts     (write)
                                body: {"weights": {"<agent key>": number, ...}}
                                Re-blends the cached scores immediately and
@@ -74,6 +79,7 @@ def make_handler(
     market: MarketService,
     advisor=None,
     workspace=None,
+    discover=None,
 ):
     """Build a request handler bound to the given service instances."""
 
@@ -98,6 +104,16 @@ def make_handler(
                     self._send_json(200, {"configured": False, "risk_profiles": None})
                 else:
                     self._send_json(200, advisor.get())
+            elif self.path == "/api/discover":
+                # Trending stocks you don't own or watch; empty state if off.
+                if discover is None:
+                    self._send_json(
+                        200,
+                        {"configured": False, "model_configured": False,
+                         "picks": None},
+                    )
+                else:
+                    self._send_json(200, discover.get())
             elif self.path == "/api/portfolios":
                 # Every portfolio + which one is active (the app's "memory").
                 if workspace is None:
@@ -124,6 +140,9 @@ def make_handler(
                 self._send_json(200, {"started": started})
             elif self.path == "/api/ai/weights":
                 self._handle_ai_weights()
+            elif self.path == "/api/discover/refresh":
+                started = discover.request_refresh() if discover else False
+                self._send_json(200, {"started": started})
             elif self.path == "/api/portfolios":
                 self._handle_portfolio_create()
             elif self.path == "/api/portfolios/switch":
@@ -235,8 +254,12 @@ def make_handler(
             self._run(action)
 
         def _reload_advisor(self):
+            # Both panels cache the active portfolio's results in memory, so
+            # both have to be repointed when the active portfolio moves.
             if advisor is not None:
                 advisor.reload()
+            if discover is not None:
+                discover.reload()
 
         def _run(self, action):
             """Read the JSON body, run a write action, and send its result.
@@ -294,10 +317,13 @@ def run_server(
     market: MarketService,
     advisor=None,
     workspace=None,
+    discover=None,
     host: str = "127.0.0.1",
     port: int = 8000,
 ):
-    handler = make_handler(portfolio, wishlist, summary, market, advisor, workspace)
+    handler = make_handler(
+        portfolio, wishlist, summary, market, advisor, workspace, discover
+    )
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"Stock assistant running at http://{host}:{port}")
     print("Press Ctrl+C to stop.")

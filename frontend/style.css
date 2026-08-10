@@ -21,21 +21,35 @@ body {
 }
 
 .container {
-  max-width: 1360px;
+  max-width: 1740px;
   margin: 0 auto;
   padding: 2rem 1.25rem 4rem;
 }
 
-/* Two columns: existing content on the left, AI advisor on the right. The left
-   column is 920px — wide enough for the holdings table's seven columns and its
-   three row actions — and the AI column sits to its right at a fixed width.
-   The container is sized to fit both plus the gap without squeezing either. */
+/* Three columns: what the market is talking about on the left, the portfolio in
+   the middle, the AI advisor on the right. The middle column is 920px — wide
+   enough for the holdings table's seven columns and its three row actions — and
+   a side panel sits at a fixed width on either side of it.
+
+   The grid is nested rather than flat, and that is what makes it degrade
+   sensibly. The AI column has always dropped below the content at 1180px; the
+   news column has to drop out one step *earlier*, because three columns need
+   ~1680px and two need ~1310. A flat three-track grid can only collapse all at
+   once, so the news and main columns share an inner grid that folds first,
+   leaving the outer AI breakpoint exactly as it was. */
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 920px) 370px;
+  grid-template-columns: minmax(0, auto) 370px;
   gap: 1.5rem;
   justify-content: center;
   align-items: start;
+}
+.left-region {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 920px);
+  gap: 1.5rem;
+  align-items: start;
+  min-width: 0;
 }
 .main-col { min-width: 0; }
 
@@ -412,9 +426,26 @@ td.num .cell-stack { align-items: flex-end; }
 #stocks-table .link-btn,
 #wishlist-table .link-btn { padding: 0.15rem 0.28rem; font-size: 0.8rem; }
 
+/* Not enough room for three columns: fold the news panel above the portfolio.
+   Still the first thing in the left region, just stacked rather than beside —
+   the AI column is untouched and stays where it is.
+
+   1717px, not a round number: the three columns and their gaps come to
+   340 + 24 + 920 + 24 + 370 = 1678, and the container's 1.25rem of padding on
+   each side needs 40 more. Rounding this down to 1680 would leave viewports
+   between 1681 and 1717 trying to fit 1718px of layout into less than that,
+   which a fixed-width grid track answers with a horizontal scrollbar. */
+@media (max-width: 1717px) {
+  .left-region {
+    grid-template-columns: minmax(0, 920px);
+    justify-content: center;
+  }
+}
+
 /* Below the two-column width, stack the AI advisor under the main content.
-   The card's own overrides for this width live with the .ai-card rules below —
-   at equal specificity the later block wins, so they have to come after it. */
+   The card's own overrides for this width live with the .panel-card rules
+   below — at equal specificity the later block wins, so they have to come
+   after it. */
 @media (max-width: 1180px) {
   .layout { grid-template-columns: minmax(0, 920px); }
 }
@@ -426,10 +457,14 @@ td.num .cell-stack { align-items: flex-end; }
   .worth-value { font-size: 2.25rem; }
 }
 
-/* --- AI Advisor ------------------------------------------------------- */
+/* --- Side panels (AI Advisor, In the News) ----------------------------- */
+/* Both side columns behave identically: a sticky card, capped to the viewport,
+   whose middle section scrolls while its heading and footer stay put. The
+   shared behaviour lives on .panel-card / .panel-col; everything below this
+   block is specific to one panel or the other. */
 
-/* Sticky so the advisor stays visible while scrolling the long left column. */
-.ai-card {
+/* Sticky so the panel stays visible while scrolling the long middle column. */
+.panel-card {
   position: sticky;
   top: 1rem;
   display: flex;
@@ -440,11 +475,11 @@ td.num .cell-stack { align-items: flex-end; }
   margin-bottom: 0; /* the only card in its column — the margin would break the match */
 }
 /* Stretch the aside to the row height so the 100% above has something definite
-   to resolve against; .layout aligns its items to the start otherwise. */
-.ai-col { align-self: stretch; }
+   to resolve against; the grid aligns its items to the start otherwise. */
+.panel-col { align-self: stretch; }
 
-/* The calls scroll; the heading, controls and disclaimer around them don't. */
-.ai-card > :not(.ai-body) { flex-shrink: 0; }
+/* The list scrolls; the heading, controls and disclaimer around it don't. */
+.panel-card > :not(.ai-body) { flex-shrink: 0; }
 .ai-body {
   margin-bottom: 0.75rem; /* breathing room above the disclaimer's rule */
   /* Size to the content, then shrink (and scroll) once the card hits its cap —
@@ -467,12 +502,31 @@ td.num .cell-stack { align-items: flex-end; }
 }
 .ai-body::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
-/* Stacked under the main content there's no column left to match, and the page
-   itself scrolls — so the card runs full height rather than trapping the calls
-   in a nested scroller. Must sit after the rules above to win the cascade. */
+/* Stacked rather than beside a column, there's nothing left to match and the
+   page itself scrolls — so the card runs full height instead of trapping its
+   list in a nested scroller. Each panel un-sticks at its own breakpoint: the
+   news column folds at 1717px, the AI column at 1180px. Must sit after the
+   rules above to win the cascade. */
+@media (max-width: 1717px) {
+  .news-card { position: static; max-height: none; margin-bottom: 1.5rem; }
+  .news-card .ai-body {
+    overflow-y: visible;
+    margin-right: 0;
+    padding-right: 0;
+  }
+  /* Full width now, so let the picks sit side by side instead of stacking
+     three tall cards down a page that has the room for a row. */
+  .news-card .news-picks {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+    gap: 0.75rem;
+  }
+  .news-card .news-pick { margin: 0; }
+}
+
 @media (max-width: 1180px) {
   .ai-card { position: static; max-height: none; margin-bottom: 1.5rem; }
-  .ai-body {
+  .ai-card .ai-body {
     overflow-y: visible;
     margin-right: 0;
     padding-right: 0;
@@ -1134,6 +1188,181 @@ td.num .cell-stack { align-items: flex-end; }
   letter-spacing: 0.03em;
 }
 .ai-detail .ai-trigger { color: var(--accent); }
+
+/* --- In the News ------------------------------------------------------ */
+/* Three picks, each answering three questions in this order: why is this here
+   (the chatter), what is it (the company), and what do the agents make of it
+   (the score). The score is last on purpose — a confidence number for a ticker
+   you've never heard of is meaningless until you know what the company does. */
+
+.news-picks { display: flex; flex-direction: column; gap: 0.75rem; }
+
+.news-pick {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.7rem 0.75rem;
+  background: var(--bg);
+}
+
+.news-pick-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+.news-pick-head .ai-ticker { font-size: 1rem; font-weight: 700; }
+.news-pick-name {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.news-pick-price {
+  margin-left: auto;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Section label inside a pick — quieter than the card-level .ai-subtitle. */
+.news-label {
+  display: block;
+  margin: 0.6rem 0 0.3rem;
+  color: var(--muted);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Which rooms are talking, and how loudly. One chip per lane. */
+.news-lane-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.news-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  padding: 0.08rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.66rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.news-chip .news-chip-n {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+/* Each room gets its own tint so a glance says where the noise is coming from:
+   retail orange, the press blue, the WSJ neutral-serious. */
+.news-chip.reddit { border-color: rgba(251, 146, 60, 0.45); color: #fb923c; }
+.news-chip.reddit .news-chip-n { color: #fb923c; }
+.news-chip.news { border-color: rgba(56, 189, 248, 0.45); color: var(--accent); }
+.news-chip.news .news-chip-n { color: var(--accent); }
+.news-chip.wsj { border-color: rgba(226, 232, 240, 0.4); color: var(--text); }
+
+/* The headlines themselves — the evidence that the pick belongs here. */
+.news-heads { list-style: none; margin: 0.35rem 0 0; padding: 0; }
+.news-heads li {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+.news-heads .news-head-lane {
+  flex-shrink: 0;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 0.2rem;
+}
+.news-heads a { color: var(--text); text-decoration: none; }
+.news-heads a:hover { color: var(--accent); text-decoration: underline; }
+.news-heads .news-head-src {
+  display: block;
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+/* What the company actually is: the facts line, then what it does. */
+.news-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.news-facts .news-fact-key { opacity: 0.7; }
+.news-about {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+/* Clamped to a few lines with the rest behind a toggle: a business summary runs
+   to a paragraph, and three of them would push the scores off the panel. */
+.news-about.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.news-more {
+  grid-column: auto;
+  background: none;
+  border: none;
+  padding: 0.15rem 0;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+}
+.news-more:hover { background: none; text-decoration: underline; }
+
+/* The score row, and the actions under it. */
+.news-verdict {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.news-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.news-actions button {
+  grid-column: auto;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.news-actions button:hover { background: var(--card); }
+.news-actions button:disabled { opacity: 0.5; cursor: default; }
+.news-actions .message { margin: 0; min-height: 0; font-size: 0.68rem; }
+
+/* Which rooms answered, in the card header. */
+.news-lanes {
+  font-size: 0.68rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* Sits below the scroll area rather than at the end of the list. */
 .ai-disclaimer {

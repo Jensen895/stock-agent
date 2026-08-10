@@ -21,6 +21,7 @@ On-disk layout (all under ``data/``)::
           sales.json
           ai_suggestions.json
           ai_weights.json         # how much each AI agent counts
+          discover.json           # trending stocks you don't own or watch
         _archive/                 # deleted portfolios are moved here, never erased
 
 The active portfolio id is persisted in ``index.json``, so restarting the app
@@ -44,12 +45,17 @@ from backend.storage import JSONStorage, StorageBackend
 # risk toggle is: a speculative watchlist and a retirement account deserve to
 # weigh the macro agent differently, and a weight set on one shouldn't quietly
 # follow you to the other.
+# ``discover.json`` holds the trending picks — stocks the market is talking
+# about that this portfolio neither holds nor watches. Per-portfolio because
+# the exclusions are: the same three names are a discovery for one portfolio
+# and old news for another that already owns them.
 DATA_FILES = (
     "portfolio.json",
     "wishlist.json",
     "sales.json",
     "ai_suggestions.json",
     "ai_weights.json",
+    "discover.json",
 )
 
 # Each portfolio remembers its own AI-advisor risk toggle (which risk profile the

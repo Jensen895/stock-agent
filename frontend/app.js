@@ -1526,11 +1526,14 @@ if (aiWeightsResetBtn) {
 }
 
 // Risk toggle — re-render from the already-loaded data (no new API call).
+// It drives the news column too: both panels generate at both risk settings,
+// so switching is a re-render on either side rather than a second control.
 riskToggleEl.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-risk]");
   if (!btn) return;
   setRisk(btn.getAttribute("data-risk"));
   renderAI();
+  if (discoverData) renderDiscover();
 });
 
 // Per-stock "Details →" — one button per row, so opening a stock never means
@@ -1615,6 +1618,434 @@ function stopAiPoll() {
 // "next refresh" stamp honest as the day rolls over.
 setInterval(loadAI, 120000);
 
+// --- In the News (read only) ------------------------------------------
+//
+// The one panel that starts from outside your list: three stocks the market is
+// talking about that you neither hold nor watch. Each answers three questions
+// in this order — why is it here (the chatter that surfaced it), what is it
+// (the company), and what do the agents make of it (the score).
+//
+// That order matters. The backend scores these with the *same* five agents as
+// the AI Advisor, so the numbers in the two columns are directly comparable —
+// but a 64/100 on a ticker you've never heard of means nothing until you know
+// what the company sells, so the score comes last rather than first.
+
+const DISCOVER_API = "/api/discover";
+
+const newsListEl = document.getElementById("news-list");
+const newsStatusEl = document.getElementById("news-status");
+const newsUpdatedEl = document.getElementById("news-updated");
+const newsLanesEl = document.getElementById("news-lanes");
+const newsRefreshBtn = document.getElementById("news-refresh");
+const newsSummaryView = document.getElementById("news-summary-view");
+const newsDetailsView = document.getElementById("news-details-view");
+const newsDetailsList = document.getElementById("news-details-list");
+const newsBackBtn = document.getElementById("news-back");
+
+// What each lane is called on screen. The backend reports which source actually
+// answered each one (Reddit or StockTwits for the retail lane), so the label
+// here is the lane, not the source.
+const NEWS_LANES = {
+  reddit: { label: "Retail", cls: "reddit" },
+  news: { label: "News", cls: "news" },
+  wsj: { label: "WSJ", cls: "wsj" },
+};
+
+let discoverData = null;
+let discoverPollTimer = null;
+let newsDetailTicker = null; // which pick's agent breakdown is open
+
+async function loadDiscover() {
+  try {
+    const res = await fetch(DISCOVER_API);
+    discoverData = await res.json();
+    renderDiscover();
+  } catch {
+    newsStatusEl.textContent = "Could not reach the discover API.";
+    newsStatusEl.className = "ai-status err";
+  }
+}
+
+// The suggestion for one pick, at the risk setting the advisor column is on.
+// Both panels read the same per-portfolio toggle rather than each carrying
+// their own — two risk switches on one screen would be a puzzle, not a control.
+function discoverProfile() {
+  const profiles = discoverData && discoverData.risk_profiles;
+  return (profiles && profiles[getRisk()]) || null;
+}
+
+function suggestionFor(ticker) {
+  const profile = discoverProfile();
+  const list = (profile && profile.suggestions) || [];
+  return list.find((s) => s.ticker === ticker) || null;
+}
+
+function renderDiscover() {
+  if (!discoverData) return;
+  setNewsStatus();
+
+  newsUpdatedEl.textContent = discoverData.generated_at
+    ? `Updated ${fmtUpdated(discoverData.generated_at)}`
+    : "—";
+
+  // Which rooms answered, and how much each returned. A lane that came back
+  // empty is named too — a blocked source should be visible, not silent.
+  const lanes = discoverData.lanes || [];
+  newsLanesEl.textContent = lanes.length
+    ? lanes.map((l) => `${l.label} ${l.headlines}`).join(" · ")
+    : discoverData.sources || "";
+  newsLanesEl.title = lanes.length
+    ? "Headlines read per source in this refresh. A source showing 0 " +
+      "didn't answer — its lane contributed nothing to these picks."
+    : "";
+
+  renderNewsPicks();
+  renderNewsDetails();
+
+  if (discoverData.refreshing) startDiscoverPoll();
+  else stopDiscoverPoll();
+}
+
+function setNewsStatus() {
+  newsStatusEl.className = "ai-status";
+  const d = discoverData;
+  if (!d.configured) {
+    newsStatusEl.className = "ai-status err";
+    newsStatusEl.textContent = d.model_configured === false
+      ? "Discover is off — no AI model is configured. See the README."
+      : "Discover is off — no chatter source is reachable.";
+  } else if (d.refreshing) {
+    newsStatusEl.textContent = "Reading the room… finding what's trending.";
+  } else if (d.error && !d.picks) {
+    newsStatusEl.className = "ai-status err";
+    newsStatusEl.textContent = d.error;
+  } else if (!d.picks) {
+    newsStatusEl.textContent = "Nothing yet — hit Refresh to go looking.";
+  } else if (!d.picks.length) {
+    newsStatusEl.textContent =
+      "Everything trending is already in your holdings or wishlist.";
+  } else {
+    const bits = [];
+    if (d.considered) bits.push(`${d.considered} names considered`);
+    if (d.skipped_known) bits.push(`${d.skipped_known} already yours`);
+    if (d.model_errors && d.model_errors.length) {
+      bits.push(`${d.model_errors.length} agent call(s) failed`);
+      newsStatusEl.className = "ai-status warn";
+    }
+    newsStatusEl.textContent = bits.join(" — ");
+  }
+  newsRefreshBtn.disabled = !d.configured || !!d.refreshing;
+}
+
+function renderNewsPicks() {
+  const picks = (discoverData && discoverData.picks) || [];
+  if (!picks.length) {
+    // The status line above already says which of the two empty cases this is.
+    newsListEl.innerHTML = discoverData.picks
+      ? ""
+      : `<p class="ai-empty">No picks yet.</p>`;
+    return;
+  }
+  const agents = agentsOf(discoverProfile());
+  newsListEl.innerHTML = picks.map((p) => newsPick(p, agents)).join("");
+}
+
+// One pick: the chatter that found it, the company behind it, the agents' call.
+function newsPick(pick, agents) {
+  const ticker = escapeHtml(pick.ticker);
+  const suggestion = suggestionFor(pick.ticker);
+  const trending = pick.trending || {};
+
+  return `<article class="news-pick" data-ticker="${ticker}">
+    <div class="news-pick-head">
+      <span class="ai-ticker">${ticker}</span>
+      ${suggestion ? scorePill(suggestion) : ""}
+      <span class="news-pick-price">${newsPrice(pick)}</span>
+      ${
+        pick.name
+          ? `<span class="news-pick-name" title="${escapeHtml(
+              pick.name
+            )}">${escapeHtml(pick.name)}</span>`
+          : ""
+      }
+    </div>
+
+    <span class="news-label">Why it's being talked about</span>
+    ${laneChips(trending)}
+    ${headlineList(trending.headlines)}
+
+    <span class="news-label">About the company</span>
+    ${backgroundBlock(pick, ticker)}
+
+    ${suggestionBlock(pick, suggestion, agents, ticker)}
+  </article>`;
+}
+
+// Price with today's move beside it, coloured like the tables.
+function newsPrice(pick) {
+  if (pick.price == null) return "";
+  const c = pick.change;
+  if (!c || c.value == null) return `$${fmt(pick.price)}`;
+  const sign = c.value > 0 ? "+" : c.value < 0 ? "−" : "";
+  const cls = c.value > 0 ? "pos" : c.value < 0 ? "neg" : "flat";
+  return `$${fmt(pick.price)}
+    <span class="day-tag ${cls}">${sign}${fmt(Math.abs(c.pct))}%</span>`;
+}
+
+// One chip per room that mentioned it, with how loudly. Mentions are weighted
+// counts, not raw headline tallies — a cashtag counts for more than a guessed
+// company name — so they're rounded and labelled as a strength, not a total.
+function laneChips(trending) {
+  const mentions = trending.mentions || {};
+  const chips = Object.keys(NEWS_LANES)
+    .filter((lane) => mentions[lane])
+    .map((lane) => {
+      const meta = NEWS_LANES[lane];
+      return `<span class="news-chip ${meta.cls}"
+        title="Mention strength in the ${escapeHtml(meta.label)} lane. Weighted:
+ a ticker written as $SYM counts for more than a company name matched in prose.">
+        ${escapeHtml(meta.label)}
+        <span class="news-chip-n">${Math.round(mentions[lane])}</span>
+      </span>`;
+    })
+    .join("");
+  return chips ? `<div class="news-lane-chips">${chips}</div>` : "";
+}
+
+function headlineList(headlines) {
+  const items = (headlines || []).slice(0, 4);
+  if (!items.length) return "";
+  return `<ul class="news-heads">${items
+    .map((h) => {
+      const lane = (NEWS_LANES[h.lane] || {}).label || h.lane || "";
+      const text = escapeHtml(h.headline || "");
+      const body = h.url
+        ? `<a href="${escapeHtml(h.url)}" target="_blank"
+             rel="noopener noreferrer">${text}</a>`
+        : text;
+      const src = [h.source, h.datetime].filter(Boolean).map(escapeHtml).join(" · ");
+      return `<li>
+        <span class="news-head-lane">${escapeHtml(lane)}</span>
+        <span>${body}${src ? `<span class="news-head-src">${src}</span>` : ""}</span>
+      </li>`;
+    })
+    .join("")}</ul>`;
+}
+
+// What the company is. The facts line first — sector, size, valuation — then
+// what it actually sells, clamped with the rest behind a toggle.
+function backgroundBlock(pick, ticker) {
+  const b = pick.background || {};
+  const facts = [];
+  if (b.sector) facts.push(["Sector", b.sector]);
+  if (b.industry) facts.push(["Industry", b.industry]);
+  if (b.market_cap != null) facts.push(["Market cap", fmtBig(b.market_cap)]);
+  if (b.revenue_growth_pct != null)
+    facts.push(["Revenue growth", `${fmt(b.revenue_growth_pct)}%`]);
+  if (b.profit_margin_pct != null)
+    facts.push(["Margin", `${fmt(b.profit_margin_pct)}%`]);
+  if (b.trailing_pe != null) facts.push(["P/E", fmt(b.trailing_pe)]);
+  if (b.beta != null) facts.push(["Beta", fmt(b.beta)]);
+  if (b.week52_low != null && b.week52_high != null)
+    facts.push(["52w", `$${fmt(b.week52_low)}–$${fmt(b.week52_high)}`]);
+  // A company that reported three days ago and one reporting next week both
+  // have "an earnings date" — say which this is rather than calling a date in
+  // the past "next earnings". A result just in is usually why it's trending.
+  const e = pick.earnings;
+  if (e && e.date) {
+    facts.push([e.reported ? "Reported" : "Next earnings", fmtEarnings(e.date)]);
+  }
+
+  const factLine = facts.length
+    ? `<div class="news-facts">${facts
+        .map(
+          ([k, v]) =>
+            `<span><span class="news-fact-key">${escapeHtml(k)}</span>
+             ${escapeHtml(String(v))}</span>`
+        )
+        .join("")}</div>`
+    : "";
+
+  if (!b.business_summary) {
+    return factLine || `<p class="news-about">No company profile available.</p>`;
+  }
+  return `${factLine}
+    <p class="news-about clamped" data-about="${ticker}">${escapeHtml(
+    b.business_summary
+  )}</p>
+    <button type="button" class="news-more" data-more="${ticker}">Read more</button>`;
+}
+
+// The agents' call. Same score pill, meter and per-agent chips as the advisor
+// column, because it is literally the same scoring run — then a Details button
+// onto the same five-argument breakdown.
+function suggestionBlock(pick, suggestion, agents, ticker) {
+  if (!suggestion) {
+    return `<span class="news-label">What the agents make of it</span>
+      <p class="news-about">Not scored yet.</p>
+      ${wishlistAction(ticker)}`;
+  }
+  const band = bandLabel(suggestion);
+  return `<span class="news-label">What the agents make of it</span>
+    <div class="news-verdict">
+      <span class="ai-action ${band.cls}">${escapeHtml(band.text)}</span>
+      <span class="ai-horizon">${fmtHorizon(suggestion)}</span>
+    </div>
+    ${scoreMeter(scoreOf(suggestion), suggestion.action)}
+    <div class="ai-row-sub">${miniScores(suggestion, agents)}</div>
+    ${
+      suggestion.headline
+        ? `<span class="ai-line">${escapeHtml(suggestion.headline)}</span>`
+        : ""
+    }
+    ${wishlistAction(ticker, true)}`;
+}
+
+function wishlistAction(ticker, withDetails = false) {
+  return `<div class="news-actions">
+    ${
+      withDetails
+        ? `<button type="button" data-news-details="${ticker}"
+             title="The five agents' full reasoning for ${ticker}">Why? →</button>`
+        : ""
+    }
+    <button type="button" data-news-wishlist="${ticker}"
+      title="Add ${ticker} to your wishlist">＋ Wishlist</button>
+    <span class="message" data-news-msg="${ticker}"></span>
+  </div>`;
+}
+
+// Details: the same card the AI Advisor renders, so a discovered stock's
+// argument is presented exactly like a holding's.
+function renderNewsDetails() {
+  if (!newsDetailsList) return;
+  const suggestion = newsDetailTicker ? suggestionFor(newsDetailTicker) : null;
+  if (!suggestion) {
+    newsDetailsList.innerHTML = `<p class="ai-empty">No details.</p>`;
+    return;
+  }
+  newsDetailsList.innerHTML = detailCard(suggestion, "wishlist");
+}
+
+function enterNewsDetails(ticker) {
+  newsDetailTicker = ticker;
+  renderNewsDetails();
+  newsSummaryView.hidden = true;
+  newsDetailsView.hidden = false;
+  newsDetailsView.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function exitNewsDetails() {
+  const from = newsDetailTicker;
+  newsDetailTicker = null;
+  newsDetailsView.hidden = true;
+  newsSummaryView.hidden = false;
+  const card =
+    from && newsListEl.querySelector(`.news-pick[data-ticker="${from}"]`);
+  if (card) card.scrollIntoView({ block: "center" });
+}
+
+// Pick actions — delegated, so they survive every re-render.
+newsListEl.addEventListener("click", async (e) => {
+  const moreBtn = e.target.closest("[data-more]");
+  if (moreBtn) {
+    const ticker = moreBtn.getAttribute("data-more");
+    const para = newsListEl.querySelector(`[data-about="${ticker}"]`);
+    if (para) {
+      const clamped = para.classList.toggle("clamped");
+      moreBtn.textContent = clamped ? "Read more" : "Show less";
+    }
+    return;
+  }
+
+  const detailsBtn = e.target.closest("[data-news-details]");
+  if (detailsBtn) {
+    enterNewsDetails(detailsBtn.getAttribute("data-news-details"));
+    return;
+  }
+
+  // Add to wishlist: the natural next step once a pick looks interesting, and
+  // it also takes the stock out of future discover runs — the backend excludes
+  // anything you watch, so a pick you act on won't come back tomorrow.
+  const addBtn = e.target.closest("[data-news-wishlist]");
+  if (!addBtn) return;
+  const ticker = addBtn.getAttribute("data-news-wishlist");
+  const msg = newsListEl.querySelector(`[data-news-msg="${ticker}"]`);
+  addBtn.disabled = true;
+  try {
+    const res = await fetch(WISHLIST_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (msg) setMessage(msg, data.error || "Could not add.", "err");
+      addBtn.disabled = false;
+      return;
+    }
+    if (msg) setMessage(msg, "Added to wishlist.", "ok");
+    loadWishlist();
+  } catch {
+    if (msg) setMessage(msg, "Could not reach the API.", "err");
+    addBtn.disabled = false;
+  }
+});
+
+newsBackBtn.addEventListener("click", exitNewsDetails);
+
+newsRefreshBtn.addEventListener("click", async () => {
+  try {
+    const res = await fetch(`${DISCOVER_API}/refresh`, { method: "POST" });
+    const data = await res.json();
+    if (data.started) {
+      newsStatusEl.className = "ai-status";
+      newsStatusEl.textContent = "Reading the room… finding what's trending.";
+      newsRefreshBtn.disabled = true;
+      startDiscoverPoll();
+    } else {
+      loadDiscover();
+    }
+  } catch {
+    newsStatusEl.textContent = "Could not reach the discover API.";
+    newsStatusEl.className = "ai-status err";
+  }
+});
+
+function startDiscoverPoll() {
+  if (discoverPollTimer) return;
+  discoverPollTimer = setInterval(loadDiscover, 5000);
+}
+function stopDiscoverPoll() {
+  if (discoverPollTimer) {
+    clearInterval(discoverPollTimer);
+    discoverPollTimer = null;
+  }
+}
+
+// Pick up the daily opening-bell refresh without a reload, on the advisor's
+// clock — the two panels regenerate at the same bell.
+setInterval(loadDiscover, 120000);
+
+// A big currency figure in the shortest honest form: $1.24T, $890.5B, $12.3M.
+function fmtBig(n) {
+  const v = Number(n);
+  if (!isFinite(v)) return "—";
+  const abs = Math.abs(v);
+  const units = [
+    [1e12, "T"],
+    [1e9, "B"],
+    [1e6, "M"],
+    [1e3, "K"],
+  ];
+  for (const [size, suffix] of units) {
+    if (abs >= size) {
+      return `$${(v / size).toFixed(abs / size >= 100 ? 0 : 1)}${suffix}`;
+    }
+  }
+  return `$${fmt(v)}`;
+}
+
 // --- Portfolios (switch / create / rename / delete) -------------------
 //
 // Each portfolio is a separate workspace on the server; the active one is
@@ -1657,9 +2088,11 @@ function renderPortfolios() {
   portfolioDeleteBtn.disabled = list.length <= 1;
 
   // The AI risk toggle is per-portfolio; now that the active portfolio (and its
-  // saved risk) is known, refresh the AI panel so it shows the right profile —
-  // covers the case where the AI data loaded before the portfolio list did.
+  // saved risk) is known, refresh the panels that key off it so they show the
+  // right profile — covers the case where their data loaded before the
+  // portfolio list did.
   if (aiData) renderAI();
+  if (discoverData) renderDiscover();
 }
 
 // Return the entry for the currently active portfolio (for prefilling rename).
@@ -1679,10 +2112,16 @@ function reloadAllPanels() {
   setMessage(aiWeightsMsg, "", "");
   if (aiDetailsView) aiDetailsView.hidden = true;
   if (aiSummaryView) aiSummaryView.hidden = false;
+  // The news picks are per-portfolio too — what counts as a discovery depends
+  // on what that portfolio already holds and watches.
+  newsDetailTicker = null;
+  if (newsDetailsView) newsDetailsView.hidden = true;
+  if (newsSummaryView) newsSummaryView.hidden = false;
   loadSummary();
   loadStocks();
   loadWishlist();
   loadAI();
+  loadDiscover();
 }
 
 // Small POST helper for the portfolio endpoints: sends JSON, applies the
@@ -1779,3 +2218,4 @@ loadSummary();
 loadStocks();
 loadWishlist();
 loadAI();
+loadDiscover();

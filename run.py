@@ -55,6 +55,7 @@ from backend.ai_advisor import (
 )
 from backend.ai_agents import AGENT_KEYS
 from backend.analyst_data import YahooAnalystProvider
+from backend.discover import DiscoverService
 from backend.fundamentals_data import YahooFundamentalsProvider
 from backend.market_data import MarketDataProvider
 from backend.news_data import (
@@ -65,6 +66,7 @@ from backend.news_data import (
     YahooNewsProvider,
 )
 from backend.server import run_server
+from backend.trending_data import TrendingBoard
 from backend.service import (
     MarketService,
     PortfolioService,
@@ -269,7 +271,31 @@ def main():
     # nothing is cached). The Refresh button in the UI forces one any time.
     advisor.start_scheduler()
 
-    run_server(portfolio, wishlist, summary, market, advisor, manager,
+    # Discover: the one panel that starts from outside your list. It reads what
+    # three rooms are talking about — retail chatter, the financial press, and
+    # the WSJ — drops everything already held or watched, and sends the top
+    # three through the *same* five agents the advisor uses, so a stock found
+    # on Reddit and a stock you've held for a year carry comparable scores.
+    #
+    # No API key: the lanes are Reddit's public JSON (StockTwits when Reddit is
+    # blocked, which some networks do), Google News RSS, and the WSJ via Google
+    # News. Candidate symbols are validated against Yahoo before they can reach
+    # the board, which is what keeps CNBC and "Weak Jobs Report" off it.
+    #
+    # Cost: five agents x two risk profiles, so up to ten more model calls per
+    # day on top of the advisor's twenty. It shares the advisor's daily bell but
+    # waits for it to finish first, to keep the burst off a free tier's
+    # per-minute quota.
+    board = TrendingBoard()
+    print(f"Discover: {board.describe()}")
+    discover = DiscoverService(
+        board, advisor, market, news, wishlist, portfolio,
+        fundamentals=fundamentals, analysts=analysts,
+        storage=WorkspaceStorage(manager, "discover.json"),
+    )
+    discover.start_scheduler()
+
+    run_server(portfolio, wishlist, summary, market, advisor, manager, discover,
                host="127.0.0.1", port=8000)
 
 

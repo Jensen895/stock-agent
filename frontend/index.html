@@ -28,8 +28,59 @@
       <p id="portfolio-message" class="message portfolio-message" role="status"></p>
     </header>
 
-    <!-- Two columns: everything so far on the left, the AI advisor on the right. -->
+    <!-- Three columns: what the market is talking about on the left, the
+         portfolio in the middle, the AI advisor on the right. The two side
+         columns are the same kind of thing — a sticky panel that scrolls its
+         own contents — and share the .panel-card / .panel-col styling. -->
     <div class="layout">
+    <div class="left-region">
+
+    <!-- IN THE NEWS (read only) — the only panel that starts from outside your
+         list: three stocks the market is talking about that you neither hold
+         nor watch, scored by the same five agents as everything else. -->
+    <aside class="news-col panel-col">
+      <section class="card panel-card news-card">
+        <div class="ai-head">
+          <h2 title="The three most talked-about stocks across retail chatter (Reddit / StockTwits), the financial press, and the Wall Street Journal — excluding anything already in your holdings or wishlist. Each one carries why it's being talked about, what the company actually does, and the same 0-100 confidence score from the same five agents as the AI Advisor, so the numbers in the two columns mean the same thing. Refreshes once a day at the opening bell.">📰 In the News</h2>
+          <button id="news-refresh" class="secondary" type="button">Refresh</button>
+        </div>
+
+        <div class="ai-controls">
+          <!-- Which rooms actually answered. A blocked source says so here
+               rather than quietly contributing nothing. -->
+          <span id="news-lanes" class="news-lanes"></span>
+          <span id="news-updated" class="ai-updated">—</span>
+        </div>
+
+        <p id="news-status" class="ai-status" role="status"></p>
+
+        <!-- Scrolls inside the card, exactly like the AI Advisor's list, so the
+             heading, Refresh and disclaimer stay put however long it gets. -->
+        <div class="ai-body">
+
+          <div id="news-summary-view">
+            <span class="ai-subtitle">Most talked about — not yours yet</span>
+            <div id="news-list" class="news-picks">
+              <p class="ai-empty">Loading…</p>
+            </div>
+          </div>
+
+          <!-- The five agents' full argument for one pick, same cards as the
+               AI Advisor's details view. -->
+          <div id="news-details-view" hidden>
+            <button id="news-back" class="link-btn ai-back" type="button">
+              ← Back to the list
+            </button>
+            <div id="news-details-list" class="ai-details"></div>
+          </div>
+
+        </div><!-- /.ai-body -->
+
+        <p class="ai-disclaimer">AI-generated from public chatter. Not financial
+          advice — verify before you trade.</p>
+      </section>
+    </aside>
+
     <div class="main-col">
 
     <!-- DASHBOARD (read only) -->
@@ -195,10 +246,11 @@
     </section>
 
     </div><!-- /.main-col -->
+    </div><!-- /.left-region -->
 
     <!-- AI ADVISOR (read only) — five agents' one-to-three-month outlook. -->
-    <aside class="ai-col">
-      <section class="card ai-card">
+    <aside class="ai-col panel-col">
+      <section class="card panel-card ai-card">
         <!-- No description paragraph here on purpose: this column is narrow and
              the calls are what it's for, so prose above them cost more screen
              than it earned. The explanation lives on the heading's tooltip, and

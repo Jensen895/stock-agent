@@ -1574,6 +1574,15 @@ class AIAdvisorService:
             self.weights = self._load_weights()
             self._latest = self._load_persisted()
 
+    def refreshing(self) -> bool:
+        """True while a generation is in flight.
+
+        Public because the discover panel schedules itself around it: both draw
+        on the same daily model quota, and firing them at the same bell would
+        put twice the burst through a free tier at once.
+        """
+        return self._refreshing
+
     def request_refresh(self) -> bool:
         """Kick off a background regeneration. Returns False if one is running
         or the advisor isn't configured (nothing to do)."""
@@ -1756,6 +1765,63 @@ class AIAdvisorService:
             if (p.get("wishlist") or {}).get("suggestions")
         )
         print(f"AI advisor: refreshed at {self._latest['generated_at']} ({note}{w_note}).")
+
+    def score_context(self, context: dict, kind: str, tickers: list,
+                      street: dict = None):
+        """Run every agent over a context someone else prepared, both risks.
+
+        The five agents, the weights and the blending are the most valuable
+        thing in this module, and they are not specific to a portfolio — they
+        score whatever tickers you put in front of them. This exposes that
+        machinery to callers who assemble their own evidence: the discover panel
+        scores three stocks nobody owns and which are not on the wishlist, and
+        should get exactly the same treatment as everything else on screen
+        rather than a second, lesser scoring path.
+
+        It is a separate method rather than a parameter on ``_generate``
+        because ``_generate`` fans holdings and wishlist out through *one*
+        thread pool on purpose — a refresh then costs roughly one round-trip
+        instead of two — and because its cache, its persisted file and its
+        wishlist filtering all belong to the portfolio. Nothing here touches
+        any of them.
+
+        Returns ``(profiles_by_risk, errors)``. Deliberately unfiltered, unlike
+        ``_merge_wishlist``: the caller named these tickers, so "we looked, and
+        it's a hold" is an answer they asked for, not a row to hide.
+        """
+        clients = self.active_clients()
+        if not clients:
+            raise RuntimeError("No AI model is configured.")
+
+        jobs = [(agent, risk) for risk in _RISK_PROFILES for agent in AGENTS]
+        raw = {risk: {} for risk in _RISK_PROFILES}
+        errors = []
+
+        lanes = max(2, min(len(jobs), len(clients) * 2))
+        with ThreadPoolExecutor(max_workers=lanes) as pool:
+            futures = {
+                pool.submit(self._run_agent, agent, risk, kind, context, clients):
+                    (agent, risk)
+                for agent, risk in jobs
+            }
+            for future in as_completed(futures):
+                agent, risk = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    errors.append(f"{agent.name} ({risk}): {e}")
+                    continue
+                if result is None:
+                    continue  # this agent had no evidence for these tickers
+                label, cleaned = result
+                raw[risk][agent.key] = (label, cleaned)
+
+        profiles = {}
+        for risk in _RISK_PROFILES:
+            votes = self._ordered_votes(raw[risk])
+            if votes:
+                profiles[risk] = self._merge_agents(votes, street or {}, tickers)
+        return profiles, errors
 
     def _run_agent(self, agent, risk: str, kind: str, context: dict, clients: list):
         """Ask one agent one question. Returns (model_label, cleaned) or None.
