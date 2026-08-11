@@ -305,6 +305,21 @@
             <span class="ai-legend-end pos">buy · 100</span>
           </div>
 
+          <!-- SORT + SHOW — reorder the list, or narrow it to the calls you
+               care about. Both act on the rows already on screen: no model
+               runs, nothing is recomputed, and the count on the right says
+               how many rows the filter is holding back. -->
+          <div id="ai-holdings-ctl" class="ai-listctl" hidden>
+            <label class="ai-ctl-label" for="ai-holdings-sort">Sort</label>
+            <select id="ai-holdings-sort" class="ai-sort"
+              title="Order the calls by name, by the blended score, or by any one agent's score."></select>
+            <span class="ai-ctl-label">Show</span>
+            <div id="ai-holdings-show" class="ai-show" role="group"
+              aria-label="Show which calls"
+              title="Pick any combination — only stocks whose call is selected are listed."></div>
+            <span id="ai-holdings-count" class="ai-ctl-count"></span>
+          </div>
+
           <!-- Every row carries its own "Details" button, so a long list
                never means scrolling to the bottom to open one stock. -->
           <ul id="ai-summary-list" class="ai-summary">
@@ -315,10 +330,18 @@
                than merged: they were written from different evidence. -->
           <div id="ai-portfolio-note" class="ai-notes"></div>
 
-          <!-- WISHLIST BUYS (minimized): only when AI flags a good entry. -->
+          <!-- WISHLIST BUYS (minimized): only when AI flags a good entry.
+               No Show control here on purpose — the backend already dropped
+               everything below the buy band, so every row in this list is a
+               buy and there is nothing to filter between. -->
           <div id="ai-wishlist-section" hidden>
             <div class="ai-divider"></div>
             <span class="ai-subtitle">⭐ Wishlist — good entries now</span>
+            <div id="ai-wishlist-ctl" class="ai-listctl" hidden>
+              <label class="ai-ctl-label" for="ai-wishlist-sort">Sort</label>
+              <select id="ai-wishlist-sort" class="ai-sort"
+                title="Order these entries by name, by the blended score, or by any one agent's score."></select>
+            </div>
             <ul id="ai-wishlist-list" class="ai-summary"></ul>
             <div id="ai-wishlist-note" class="ai-notes"></div>
           </div>

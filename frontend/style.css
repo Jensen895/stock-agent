@@ -599,6 +599,80 @@ td.num .cell-stack { align-items: flex-end; }
   margin-bottom: 0.5rem;
 }
 
+/* SORT + SHOW — one control block per list. Two rows in a narrow column:
+   the sort menu on top, the band chips under it, with the "5 of 23" tally
+   tucked to the right of the chips so a filter never hides rows silently. */
+.ai-listctl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.35rem 0.45rem;
+  margin: 0 0 0.6rem;
+}
+.ai-ctl-label {
+  color: var(--muted);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.ai-sort {
+  width: 100%;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.35rem;
+  font-family: inherit;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+.ai-sort:focus { outline: none; border-color: var(--accent); }
+
+.ai-show { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.ai-show-btn {
+  grid-column: auto;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ai-show-btn:hover { background: var(--bg); color: var(--text); }
+/* Selected chips carry their band's colour, so the row of chips reads as the
+   same legend as the score pills and action badges below it. */
+.ai-show-btn.active { color: var(--text); border-color: currentColor; }
+.ai-show-btn.all.active {
+  color: var(--accent);
+  background: rgba(56, 189, 248, 0.12);
+}
+.ai-show-btn.buy.active {
+  color: var(--ok);
+  background: rgba(74, 222, 128, 0.15);
+}
+.ai-show-btn.hold.active {
+  color: var(--text);
+  background: rgba(148, 163, 184, 0.2);
+}
+.ai-show-btn.trim.active {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.15);
+}
+.ai-show-btn.sell.active {
+  color: var(--err);
+  background: rgba(248, 113, 113, 0.15);
+}
+.ai-ctl-count {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+.ai-ctl-count:empty { display: none; }
+
 /* Summary: one bullet per stock — ticker, action badge, horizon. */
 .ai-summary { list-style: none; margin: 0; padding: 0; }
 .ai-summary li {

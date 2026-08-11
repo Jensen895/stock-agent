@@ -1071,39 +1071,330 @@ function renderNotes(container, profile) {
     .join("");
 }
 
+// --- List controls: sort + show -----------------------------------------
+//
+// Two dozen holdings is more than anyone reads top to bottom, so each list
+// carries its own ordering and its own band filter. Both work on the rows
+// already on screen — no model call, nothing recomputed, no request — which is
+// what makes them worth flipping between: "who do the statistics hate?" is one
+// click away from "who does the street love?".
+//
+// Only the holdings list gets a Show filter. The wishlist arrives already cut
+// to the buy band by the backend, so every row in it is a buy: a control for
+// choosing between calls would offer a choice that doesn't exist there. It
+// still sorts — `show: null` is what marks a list as unfiltered.
+
+const AI_SHOW_BANDS = ["buy", "hold", "trim", "sell"];
+
+const AI_LIST_DEFAULTS = {
+  holdings: { sort: "list", show: [...AI_SHOW_BANDS] },
+  wishlist: { sort: "score:desc", show: null },
+};
+
+const AI_LIST_PREFS_KEY = "stockagent.aiList";
+
+// Element handles per list, looked up once. `ctl` is the whole control block —
+// hidden when the list it belongs to is empty, since sorting nothing is noise.
+const AI_LIST_ELS = {
+  holdings: {
+    ctl: document.getElementById("ai-holdings-ctl"),
+    sort: document.getElementById("ai-holdings-sort"),
+    show: document.getElementById("ai-holdings-show"),
+    count: document.getElementById("ai-holdings-count"),
+  },
+  // No `show` / `count` here: the wishlist sorts but doesn't filter.
+  wishlist: {
+    ctl: document.getElementById("ai-wishlist-ctl"),
+    sort: document.getElementById("ai-wishlist-sort"),
+    show: null,
+    count: null,
+  },
+};
+
+let aiListPrefsCache = null;
+
+function aiListPrefs(kind) {
+  if (!aiListPrefsCache) aiListPrefsCache = loadAiListPrefs();
+  return aiListPrefsCache[kind];
+}
+
+// Read the saved settings, validating as we go: a stored value that no longer
+// means anything (an agent that left the roster, a band that was renamed) falls
+// back to the default rather than silently emptying the list.
+function loadAiListPrefs() {
+  const out = {};
+  for (const kind of Object.keys(AI_LIST_DEFAULTS)) {
+    const fallback = AI_LIST_DEFAULTS[kind];
+    let saved = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(`${AI_LIST_PREFS_KEY}.${kind}`));
+    } catch {
+      saved = null;
+    }
+    const saveable =
+      fallback.show && saved && Array.isArray(saved.show)
+        ? saved.show.filter((b) => AI_SHOW_BANDS.includes(b))
+        : null;
+    out[kind] = {
+      sort: (saved && typeof saved.sort === "string" && saved.sort) || fallback.sort,
+      // An empty saved selection is a real choice ("show me nothing"), so it is
+      // kept; a missing or corrupt one isn't, and falls back. A list with no
+      // Show control stays null — unfiltered, not "filtered to everything".
+      show: saveable || (fallback.show ? [...fallback.show] : null),
+    };
+  }
+  return out;
+}
+
+function saveAiListPrefs(kind) {
+  try {
+    localStorage.setItem(
+      `${AI_LIST_PREFS_KEY}.${kind}`,
+      JSON.stringify(aiListPrefs(kind))
+    );
+  } catch {
+    /* localStorage unavailable (private mode) — the choice holds for this session */
+  }
+}
+
+// The band a suggestion falls in, defaulting to hold for anything unrecognised
+// so a stray action never drops a row out of every filter at once.
+function actionOf(s) {
+  return AI_ACTIONS[s && s.action] ? s.action : "hold";
+}
+
+// One agent's own score for a stock, or null when that agent didn't answer for
+// it. Sorting by an agent that skipped half the list is legitimate — the ones
+// it skipped simply sink to the bottom.
+function agentScoreOf(s, key) {
+  const src = (s.sources || []).find((v) => v.kind === "agent" && v.key === key);
+  return src && typeof src.confidence === "number" ? src.confidence : null;
+}
+
+// Sort values are "field[:key]:direction"; "list" means the order the backend
+// produced (portfolio order for holdings, best-first for the wishlist buys).
+function aiComparator(sort) {
+  const parts = String(sort || "").split(":");
+  if (parts[0] === "ticker") {
+    const dir = parts[1] === "desc" ? -1 : 1;
+    return (x, y) => dir * byTicker(x, y);
+  }
+  if (parts[0] === "score") {
+    return byScore((s) => scoreOf(s), parts[1] === "asc" ? 1 : -1);
+  }
+  if (parts[0] === "agent" && parts[1]) {
+    return byScore((s) => agentScoreOf(s, parts[1]), parts[2] === "asc" ? 1 : -1);
+  }
+  return null; // "list" — leave the backend's order alone
+}
+
+function byTicker(x, y) {
+  return String(x.ticker || "").localeCompare(String(y.ticker || ""));
+}
+
+// Sort on a number that may be missing. Unscored rows always sink to the
+// bottom, whichever direction is chosen — flipping to "low first" to surface
+// the worst stocks shouldn't hand you a screen of em dashes instead. Ties fall
+// back to the ticker so the order is stable between renders.
+function byScore(pick, dir) {
+  return (x, y) => {
+    const a = pick(x);
+    const b = pick(y);
+    if (a == null && b == null) return byTicker(x, y);
+    if (a == null) return 1;
+    if (b == null) return -1;
+    return a === b ? byTicker(x, y) : dir * (a - b);
+  };
+}
+
+// Apply one list's saved sort, and its band filter if it has one. Never mutates
+// the input: the suggestions array belongs to the loaded API payload and other
+// panels read it.
+function aiListView(list, kind) {
+  const prefs = aiListPrefs(kind);
+  const shown = prefs.show
+    ? (list || []).filter((s) => prefs.show.includes(actionOf(s)))
+    : list || [];
+  const cmp = aiComparator(prefs.sort);
+  return cmp ? [...shown].sort(cmp) : shown;
+}
+
+// The sort menu, built from the live agent roster so the per-agent entries are
+// named by whoever is actually scoring — and so an agent added later shows up
+// here without a second edit.
+function sortOptionsHtml(kind) {
+  const listLabel = kind === "wishlist" ? "Wishlist order" : "Portfolio order";
+  const agents = agentRoster()
+    .map((a) => {
+      const name = escapeHtml(`${a.short} · ${a.name}`);
+      const title = escapeHtml(a.focus || a.name || "");
+      return `<option value="agent:${escapeHtml(a.key)}:desc" title="${title}"
+          >${name} — high first</option>
+        <option value="agent:${escapeHtml(a.key)}:asc" title="${title}"
+          >${name} — low first</option>`;
+    })
+    .join("");
+  return `<option value="list">${listLabel}</option>
+    <option value="ticker:asc">Ticker A → Z</option>
+    <option value="ticker:desc">Ticker Z → A</option>
+    <option value="score:desc">Avg score — high first</option>
+    <option value="score:asc">Avg score — low first</option>
+    ${agents ? `<optgroup label="One agent's score">${agents}</optgroup>` : ""}`;
+}
+
+function showChipsHtml() {
+  const chips = AI_SHOW_BANDS.map((band) => {
+    const meta = AI_ACTIONS[band];
+    return `<button type="button" class="ai-show-btn ${band}" data-band="${band}"
+      aria-pressed="false" title="${escapeHtml(meta.label)}">${escapeHtml(
+      band[0].toUpperCase() + band.slice(1)
+    )}</button>`;
+  }).join("");
+  return `<button type="button" class="ai-show-btn all" data-band="all"
+      aria-pressed="false"
+      title="Show every call — click again to clear them all">All</button>${chips}`;
+}
+
+// Draw the controls for one list. The markup is rebuilt only when it would
+// actually differ — a rebuild on the two-minute poll would close an open sort
+// menu under the cursor — so the usual path just re-marks the active chips.
+function renderAiListControls(kind, total) {
+  const els = AI_LIST_ELS[kind];
+  if (!els || !els.sort) return;
+  els.ctl.hidden = !total;
+  if (!total) return;
+
+  const signature = agentRoster()
+    .map((a) => a.key)
+    .join(",");
+  if (els.sort.getAttribute("data-roster") !== signature) {
+    els.sort.innerHTML = sortOptionsHtml(kind);
+    els.sort.setAttribute("data-roster", signature);
+  }
+  const prefs = aiListPrefs(kind);
+  els.sort.value = prefs.sort;
+  // The saved sort named an option that no longer exists (an agent left the
+  // roster). Fall back rather than leaving the menu blank.
+  if (!els.sort.value) {
+    prefs.sort = AI_LIST_DEFAULTS[kind].sort;
+    els.sort.value = prefs.sort;
+  }
+
+  if (!els.show) return; // sort-only list — nothing else to draw
+  if (!els.show.childElementCount) els.show.innerHTML = showChipsHtml();
+
+  const all = AI_SHOW_BANDS.every((b) => prefs.show.includes(b));
+  els.show.querySelectorAll("[data-band]").forEach((btn) => {
+    const band = btn.getAttribute("data-band");
+    const on = band === "all" ? all : prefs.show.includes(band);
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+// "5 of 23" — said out loud so a filter never quietly swallows rows. Silent
+// when nothing is hidden; there is no news in "23 of 23".
+function setAiListCount(kind, shown, total) {
+  const el = AI_LIST_ELS[kind] && AI_LIST_ELS[kind].count;
+  if (!el) return;
+  el.textContent = shown === total ? "" : `${shown} of ${total}`;
+  el.title = shown === total ? "" : `${total - shown} hidden by the Show filter`;
+}
+
+// What to say when the filter empties a list that does have rows in it.
+function aiFilterEmptyText(kind, total) {
+  if (!aiListPrefs(kind).show.length) {
+    return "No calls selected — pick at least one above.";
+  }
+  return `Nothing in the selected calls — all ${total} hidden.`;
+}
+
+// Flip one chip. Bands are stored in their canonical order however they were
+// clicked, so the saved value always reads like the row of chips.
+function toggleShowBand(kind, band) {
+  const prefs = aiListPrefs(kind);
+  if (band === "all") {
+    // "All" is a check-all/clear-all: it fills the set, and clicking it again
+    // once everything is on empties it. Emptying the list is a real thing to
+    // want — a blank slate to build a selection back up from — so the list
+    // says why it's blank rather than the chip refusing the click.
+    prefs.show = AI_SHOW_BANDS.every((b) => prefs.show.includes(b))
+      ? []
+      : [...AI_SHOW_BANDS];
+  } else if (prefs.show.includes(band)) {
+    prefs.show = prefs.show.filter((b) => b !== band);
+  } else {
+    prefs.show = AI_SHOW_BANDS.filter((b) => b === band || prefs.show.includes(b));
+  }
+  saveAiListPrefs(kind);
+}
+
+// Wire both lists' controls once. Changing either re-renders the panel from the
+// data already loaded, so it costs a repaint and nothing else.
+for (const kind of Object.keys(AI_LIST_ELS)) {
+  const els = AI_LIST_ELS[kind];
+
+  if (els.sort) {
+    els.sort.addEventListener("change", () => {
+      aiListPrefs(kind).sort = els.sort.value;
+      saveAiListPrefs(kind);
+      renderAI();
+    });
+  }
+
+  // Absent on a sort-only list.
+  if (els.show) {
+    els.show.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-band]");
+      if (!btn) return;
+      toggleShowBand(kind, btn.getAttribute("data-band"));
+      renderAI();
+    });
+  }
+}
+
 // Summary: bullet per stock — ticker, the blended score, the band it falls in,
 // the source scores behind it, horizon, meter.
 function renderAiSummary(profile) {
   const suggestions = (profile && profile.suggestions) || [];
+  renderAiListControls("holdings", suggestions.length);
   if (!suggestions.length) {
+    setAiListCount("holdings", 0, 0);
     aiSummaryList.innerHTML = `<li class="ai-empty">No suggestions yet.</li>`;
     aiPortfolioNote.innerHTML = "";
     return;
   }
+  const shown = aiListView(suggestions, "holdings");
+  setAiListCount("holdings", shown.length, suggestions.length);
   const agents = agentsOf(profile);
-  aiSummaryList.innerHTML = suggestions
-    .map((s) => summaryRow(s, agents, "holdings"))
-    .join("");
+  aiSummaryList.innerHTML = shown.length
+    ? shown.map((s) => summaryRow(s, agents, "holdings")).join("")
+    : `<li class="ai-empty">${escapeHtml(
+        aiFilterEmptyText("holdings", suggestions.length)
+      )}</li>`;
   renderNotes(aiPortfolioNote, profile);
 }
 
 // Wishlist buys (minimized): only rendered when the AI flags a real buy.
 // The backend already dropped everything below the buy threshold, so an empty
 // list means "nothing worth entering today" and the section stays hidden — it
-// doesn't exist until it has something to say.
+// doesn't exist until it has something to say. Which is also why this list
+// sorts but doesn't filter: everything left in it is a buy.
 function renderAiWishlist(profile) {
   const wl = (profile && profile.wishlist) || null;
   const suggestions = (wl && wl.suggestions) || [];
   if (!aiWishlistSection || !aiWishlistList) return;
   if (!suggestions.length) {
     aiWishlistSection.hidden = true;
+    renderAiListControls("wishlist", 0);
     aiWishlistList.innerHTML = "";
     if (aiWishlistNote) aiWishlistNote.innerHTML = "";
     return;
   }
   const agents = agentsOf(wl).length ? agentsOf(wl) : agentsOf(profile);
   aiWishlistSection.hidden = false;
-  aiWishlistList.innerHTML = suggestions
+  renderAiListControls("wishlist", suggestions.length);
+  aiWishlistList.innerHTML = aiListView(suggestions, "wishlist")
     .map((s) => summaryRow(s, agents, "wishlist"))
     .join("");
   renderNotes(aiWishlistNote, wl);
@@ -1310,11 +1601,15 @@ let aiDetailFilter = null; // { ticker, kind } or null
 // Pick the cards a list should show under the current filter: everything when
 // unfiltered, the one ticker when this list owns the filter, nothing when the
 // other list does.
+//
+// Unfiltered, the cards follow the summary's own sort and band filter — the
+// two views are the same list at two depths, and having them disagree on what
+// is in it would be worse than either order.
 function detailsFor(suggestions, kind) {
   const filter = aiDetailFilter;
-  if (!filter) return suggestions;
+  if (!filter) return aiListView(suggestions, kind);
   if (filter.kind !== kind) return null; // not our list — stay hidden
-  return suggestions.filter((s) => s.ticker === filter.ticker);
+  return (suggestions || []).filter((s) => s.ticker === filter.ticker);
 }
 
 function renderAiDetails(profile) {
