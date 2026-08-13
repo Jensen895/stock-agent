@@ -262,7 +262,7 @@ class DiscoverService:
         # Scored as a watchlist: the investor doesn't own these, so the agents'
         # neutral point is "wait" rather than "hold", which is the right frame.
         profiles, errors = self.advisor.score_context(
-            context, "wishlist", tickers, street
+            context, "wishlist", tickers, street, scope="discover"
         )
         if not profiles:
             raise RuntimeError("; ".join(errors) or "Every agent failed.")

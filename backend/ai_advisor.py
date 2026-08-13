@@ -1268,6 +1268,26 @@ _MAX_HORIZON_MONTHS = 3
 # Attempts per (agent, model) call before handing the agent to the next model.
 _MAX_ATTEMPTS = 3
 
+# How many agent calls to keep in the air at once, per configured model. Two is
+# right for the HTTP clients: the call is a single request that spends almost
+# all its time waiting, and a free tier's per-minute quota is the real ceiling
+# anyway.
+_LANES_PER_CLIENT = 2
+
+
+def _lanes_for(clients, jobs: int) -> int:
+    """Thread-pool width for a fan-out of ``jobs`` calls over ``clients``.
+
+    A client may override the default by exposing ``lanes``, because not every
+    client is an HTTP request. The local-CLI client spawns a process per call,
+    which is heavier than a socket but also isn't rate-limited by anyone, so it
+    asks for more lanes than a hosted model should get. Never fewer than two,
+    so a single model still overlaps its calls, and never more than there are
+    calls to make.
+    """
+    total = sum(getattr(c, "lanes", _LANES_PER_CLIENT) for c in clients)
+    return max(2, min(jobs, total))
+
 # How often the scheduler wakes to look at the clock. A minute lands the daily
 # refresh within a minute of the bell and costs nothing — the check is two
 # datetime comparisons.
@@ -1690,10 +1710,11 @@ class AIAdvisorService:
         errors = []
 
         tickers = [h["ticker"] for h in context["holdings"]]
-        lanes = max(2, min(len(all_jobs), len(clients) * 2))
+        lanes = _lanes_for(clients, len(all_jobs))
         with ThreadPoolExecutor(max_workers=lanes) as pool:
             futures = {
-                pool.submit(self._run_agent, agent, risk, kind, context, clients):
+                pool.submit(self._run_agent, agent, risk, kind, context, clients,
+                            "advisor"):
                     (agent, risk, kind)
                 for agent, risk, kind in all_jobs
             }
@@ -1767,7 +1788,7 @@ class AIAdvisorService:
         print(f"AI advisor: refreshed at {self._latest['generated_at']} ({note}{w_note}).")
 
     def score_context(self, context: dict, kind: str, tickers: list,
-                      street: dict = None):
+                      street: dict = None, scope: str = "scored"):
         """Run every agent over a context someone else prepared, both risks.
 
         The five agents, the weights and the blending are the most valuable
@@ -1788,6 +1809,11 @@ class AIAdvisorService:
         Returns ``(profiles_by_risk, errors)``. Deliberately unfiltered, unlike
         ``_merge_wishlist``: the caller named these tickers, so "we looked, and
         it's a hold" is an answer they asked for, not a row to hide.
+
+        ``scope`` names the caller for clients that key their storage by call
+        (see ``_ask``). Discover scores its picks as a wishlist, so without it
+        those ten calls would share slot names with the portfolio's own
+        wishlist and overwrite each other's files.
         """
         clients = self.active_clients()
         if not clients:
@@ -1797,10 +1823,11 @@ class AIAdvisorService:
         raw = {risk: {} for risk in _RISK_PROFILES}
         errors = []
 
-        lanes = max(2, min(len(jobs), len(clients) * 2))
+        lanes = _lanes_for(clients, len(jobs))
         with ThreadPoolExecutor(max_workers=lanes) as pool:
             futures = {
-                pool.submit(self._run_agent, agent, risk, kind, context, clients):
+                pool.submit(self._run_agent, agent, risk, kind, context, clients,
+                            scope):
                     (agent, risk)
                 for agent, risk in jobs
             }
@@ -1823,7 +1850,8 @@ class AIAdvisorService:
                 profiles[risk] = self._merge_agents(votes, street or {}, tickers)
         return profiles, errors
 
-    def _run_agent(self, agent, risk: str, kind: str, context: dict, clients: list):
+    def _run_agent(self, agent, risk: str, kind: str, context: dict, clients: list,
+                   scope: str = "advisor"):
         """Ask one agent one question. Returns (model_label, cleaned) or None.
 
         Model choice is capacity management, not opinion: agents are handed out
@@ -1846,7 +1874,7 @@ class AIAdvisorService:
         for client in rotation[:2]:  # assigned model, then one fallback
             try:
                 return client.label, self._clean_profile(
-                    self._ask(client, system, prompt, agent, risk, kind)
+                    self._ask(client, system, prompt, agent, risk, kind, scope)
                 )
             except Exception as e:
                 last_error = e
@@ -1858,12 +1886,26 @@ class AIAdvisorService:
         raise last_error
 
     @staticmethod
-    def _ask(client, system: str, prompt: str, agent, risk: str, kind: str) -> dict:
-        """One call to one model, retrying transient upstream errors."""
+    def _ask(client, system: str, prompt: str, agent, risk: str, kind: str,
+             scope: str = "advisor") -> dict:
+        """One call to one model, retrying transient upstream errors.
+
+        A client that sets ``accepts_slot`` is additionally told *which* call
+        this is — scope, side, risk and agent — so it can key a file or a cache
+        by it. The name has to be assembled here because this is the only place
+        that knows all four, and it is passed by opt-in rather than added to the
+        interface so the HTTP clients stay a three-argument ``complete_json``.
+        """
+        extra = {}
+        if getattr(client, "accepts_slot", False):
+            extra["slot"] = f"{scope}_{kind}_{risk}_{agent.key}"
+
         backoff = 2.0
         for attempt in range(_MAX_ATTEMPTS):
             try:
-                return client.complete_json(system, prompt, _SUGGESTION_SCHEMA)
+                return client.complete_json(
+                    system, prompt, _SUGGESTION_SCHEMA, **extra
+                )
             except Exception as e:
                 if attempt == _MAX_ATTEMPTS - 1 or not _is_transient(e):
                     raise

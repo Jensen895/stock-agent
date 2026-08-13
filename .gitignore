@@ -10,3 +10,10 @@ data/ai_suggestions.json
 data/*.tmp
 # Per-portfolio workspaces (holdings, wishlist, sales, AI suggestions) + registry
 data/portfolios/
+
+# Local Claude Code CLI as the advisor's model — personal setup, not part of
+# the shared project. The provider itself, its saved responses (one fixed file
+# per agent call, overwritten each refresh), and its notes.
+backend/ai_local_claude.py
+data/claude_responses/
+LOCAL_CLAUDE.md

@@ -54,6 +54,16 @@ from backend.ai_advisor import (
     OllamaClient,
 )
 from backend.ai_agents import AGENT_KEYS
+
+# Personal, untracked provider: the Claude Code CLI installed on this machine,
+# with every agent's answer written to a fixed file under data/claude_responses/
+# and read back from there. It is gitignored, so a fresh clone simply won't have
+# it — hence the guarded import. AI_PROVIDER=local-claude selects it; without
+# the file that name is skipped like any other unconfigured provider.
+try:
+    from backend.ai_local_claude import LocalClaudeClient
+except ImportError:  # pragma: no cover - the file is optional by design
+    LocalClaudeClient = None
 from backend.analyst_data import YahooAnalystProvider
 from backend.discover import DiscoverService
 from backend.fundamentals_data import YahooFundamentalsProvider
@@ -175,12 +185,26 @@ def main():
     #           key: https://www.internalfb.com/metagen/tools/llm-api-keys
     #   ollama: ollama serve; ollama pull llama3.1   (local, no key)
     #   claude: export ANTHROPIC_API_KEY=...        (public Claude API)
+    #   local-claude: the `claude` CLI already installed on this machine — no
+    #           key, it uses whatever account Claude Code is logged into, and
+    #           every agent's answer is saved to a fixed file under
+    #           data/claude_responses/ and read back from there. Untracked;
+    #           see backend/ai_local_claude.py and LOCAL_CLAUDE.md.
     #
     # News needs no API key: Yahoo Finance first, Google News RSS as the
     # fallback for tickers Yahoo has nothing on. Set FINNHUB_API_KEY to append
     # Finnhub (richer summaries) as a last resort. Feeding real headlines is not
     # optional — given none, the agents invent confident, wrong ones.
     def _build_client(name):
+        if name in ("local-claude", "claude-cli"):
+            if LocalClaudeClient is None:
+                print(
+                    "AI advisor: 'local-claude' requested but "
+                    "backend/ai_local_claude.py isn't present (it's gitignored) "
+                    "— skipping."
+                )
+                return None
+            return LocalClaudeClient()
         if name == "claude":
             return ClaudeClient(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         if name == "ollama":
