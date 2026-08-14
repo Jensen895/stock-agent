@@ -53,6 +53,7 @@ from backend.ai_advisor import (
     LlamaClient,
     OllamaClient,
 )
+from backend.actions import AiActionsService
 from backend.ai_agents import AGENT_KEYS
 
 # Personal, untracked provider: the Claude Code CLI installed on this machine,
@@ -319,8 +320,19 @@ def main():
     )
     discover.start_scheduler()
 
+    # AI Actions: the last step after all the scoring — what to actually do
+    # today, in shares, against a dummy $10,000 cash balance. It calls no model
+    # and stores nothing; it is arithmetic over the suggestions the advisor and
+    # discover panels have already produced, so it costs a page load and moves
+    # the moment either of them (or an agent weight) changes.
+    #
+    # The balance is pretend on purpose: the app doesn't know what's in your
+    # brokerage account, so the dollar figures are a scale and the proportions
+    # are the answer. Change it by passing budget= here.
+    actions = AiActionsService(advisor, discover, market, portfolio)
+
     run_server(portfolio, wishlist, summary, market, advisor, manager, discover,
-               host="127.0.0.1", port=8000)
+               actions, host="127.0.0.1", port=8000)
 
 
 if __name__ == "__main__":

@@ -392,12 +392,33 @@ function epsTag(e) {
 }
 
 // Prefill the Buy / Add Stock form with a ticker and jump to it. Shared by the
-// holdings rows (buying more of what you hold) and the wishlist rows.
-function prefillBuy(ticker) {
+// holdings rows (buying more of what you hold), the wishlist rows, and the AI
+// Actions plan — which also passes the share count and price it sized, so the
+// suggested order arrives in the form ready to check. Never submitted for you:
+// a model's suggestion should still take a deliberate click to become a trade.
+function prefillBuy(ticker, shares, price) {
   document.getElementById("ticker").value = ticker;
+  if (shares != null) document.getElementById("shares").value = round4(shares);
+  if (price != null) document.getElementById("avg_price").value = round4(price);
   setMessage(buyMsg, "", "");
   buyForm.scrollIntoView({ behavior: "smooth", block: "center" });
   document.getElementById("shares").focus();
+}
+
+// The same, for the Sell Stock form.
+function prefillSell(ticker, shares, price) {
+  document.getElementById("sell-ticker").value = ticker;
+  if (shares != null) document.getElementById("sell-shares").value = round4(shares);
+  if (price != null) document.getElementById("sell-price").value = round4(price);
+  setMessage(sellMsg, "", "");
+  sellForm.scrollIntoView({ behavior: "smooth", block: "center" });
+  document.getElementById("sell-shares").focus();
+}
+
+// Form fields take a raw number, not a formatted string — grouping separators
+// would make the input invalid.
+function round4(n) {
+  return Math.round(Number(n) * 10000) / 10000;
 }
 
 // Row actions — event-delegated so they work on re-rendered rows.
@@ -412,12 +433,7 @@ tbody.addEventListener("click", async (e) => {
   // Sell: prefill the Sell Stock form with this ticker and jump to it.
   const sellBtn = e.target.closest("[data-sell]");
   if (sellBtn) {
-    const ticker = sellBtn.getAttribute("data-sell");
-    const sellTicker = document.getElementById("sell-ticker");
-    sellTicker.value = ticker;
-    setMessage(sellMsg, "", "");
-    sellForm.scrollIntoView({ behavior: "smooth", block: "center" });
-    document.getElementById("sell-shares").focus();
+    prefillSell(sellBtn.getAttribute("data-sell"));
     return;
   }
 
@@ -442,6 +458,7 @@ tbody.addEventListener("click", async (e) => {
     setMessage(sellMsg, `Deleted ${data.deleted} from your holdings.`, "ok");
     loadStocks();
     loadSummary();
+    loadActions();
   } catch {
     setMessage(sellMsg, "Could not reach the API.", "err");
   }
@@ -484,6 +501,8 @@ buyForm.addEventListener("submit", async (e) => {
     buyForm.reset();
     loadStocks();
     loadSummary();
+    // A new position changes what a sell can be sized against.
+    loadActions();
   } catch {
     setMessage(buyMsg, "Could not reach the API.", "err");
   }
@@ -528,6 +547,7 @@ sellForm.addEventListener("submit", async (e) => {
     sellForm.reset();
     loadStocks();
     loadSummary();
+    loadActions();
   } catch {
     setMessage(sellMsg, "Could not reach the API.", "err");
   }
@@ -721,6 +741,8 @@ function escapeHtml(str) {
 // now carry live prices).
 refreshBtn.addEventListener("click", loadSummary);
 refreshBtn.addEventListener("click", loadWishlist);
+// The plan is priced live, so it re-sizes on the same click.
+refreshBtn.addEventListener("click", loadActions);
 
 // --- AI Advisor (read only) -------------------------------------------
 
@@ -1798,6 +1820,9 @@ async function applyWeights(weights) {
     weightDraft = null;
     aiData = data;
     renderAI();
+    // The plan is a function of the blended scores, so a reweight resizes the
+    // orders too — that is most of the reason the sliders are interesting.
+    loadActions();
     setMessage(aiWeightsMsg, "Applied — scores re-blended.", "ok");
   } catch {
     setMessage(aiWeightsMsg, "Could not reach the AI API.", "err");
@@ -1829,6 +1854,8 @@ riskToggleEl.addEventListener("click", (e) => {
   setRisk(btn.getAttribute("data-risk"));
   renderAI();
   if (discoverData) renderDiscover();
+  // Both risk profiles are already in the payload, so this is a re-render too.
+  if (actionsData) renderActions();
 });
 
 // Per-stock "Details →" — one button per row, so opening a stock never means
@@ -1900,7 +1927,12 @@ aiRefreshBtn.addEventListener("click", async () => {
 // without a manual reload.
 function startAiPoll() {
   if (aiPollTimer) return;
-  aiPollTimer = setInterval(loadAI, 5000);
+  // The action plan is derived from these suggestions, so it follows them —
+  // otherwise a finished refresh would leave orders sized off the old scores.
+  aiPollTimer = setInterval(() => {
+    loadAI();
+    loadActions();
+  }, 5000);
 }
 function stopAiPoll() {
   if (aiPollTimer) {
@@ -1910,8 +1942,12 @@ function stopAiPoll() {
 }
 
 // Pick up the daily opening-bell refresh without a reload — and keep the
-// "next refresh" stamp honest as the day rolls over.
-setInterval(loadAI, 120000);
+// "next refresh" stamp honest as the day rolls over. The action plan rides
+// along: it is sized off live prices, so it goes stale faster than the scores.
+setInterval(() => {
+  loadAI();
+  loadActions();
+}, 120000);
 
 // --- In the News (read only) ------------------------------------------
 //
@@ -2341,6 +2377,369 @@ function fmtBig(n) {
   return `$${fmt(v)}`;
 }
 
+// --- AI Actions (read only) -------------------------------------------
+//
+// The step after every score: what to actually do today, in shares. The other
+// AI panels answer "how do the agents feel about this stock?" — this one turns
+// those same numbers into orders sized against a pretend $10,000, because a
+// 78/100 doesn't tell you whether to act today or how much to put in.
+//
+// Nothing here calls a model: the backend re-derives the plan from the cached
+// suggestions on every request, so it is instant, free, and moves the moment a
+// weight slider, the risk toggle or a price does. It also means the plan is
+// never fresher than the columns it reads from.
+//
+// The summary is always visible; each row opens onto the same five-agent
+// detail card the AI Advisor renders, so "why am I being told to buy this?" is
+// one tap away rather than a different panel.
+
+const ACTIONS_API = "/api/actions";
+
+const actionsBudgetEl = document.getElementById("actions-budget");
+const actionsSummaryEl = document.getElementById("actions-summary");
+const actionsCashEl = document.getElementById("actions-cash");
+const actionsStatusEl = document.getElementById("actions-status");
+const actionsListEl = document.getElementById("actions-list");
+
+// The only two kinds of row: things to do. A neutral score isn't an action and
+// doesn't get listed — it is still there, scored, in the AI Advisor column. The
+// colour classes are the advisor's own, so a row here and a badge there mean
+// the same thing.
+const ACTION_KINDS = {
+  buys: { verb: "Buy", cls: "buy" },
+  sells: { verb: "Sell", cls: "sell" },
+};
+
+let actionsData = null;
+// Which rows are expanded, kept across re-renders (the panel re-renders on the
+// AI poll, and collapsing a card someone is reading would be worse than the
+// staleness it avoids).
+const openActionRows = new Set();
+
+async function loadActions() {
+  try {
+    const res = await fetch(ACTIONS_API);
+    actionsData = await res.json();
+    renderActions();
+  } catch {
+    actionsStatusEl.textContent = "Could not reach the actions API.";
+    actionsStatusEl.className = "ai-status err";
+  }
+}
+
+// The plan for whichever risk setting the AI Advisor is on — both are computed
+// server-side, so switching is a re-render rather than a request.
+function actionsPlan() {
+  const plans = actionsData && actionsData.plans;
+  return (plans && plans[getRisk()]) || null;
+}
+
+function renderActions() {
+  if (!actionsData) return;
+  // Before anything has been scored there is no plan to show — and "holding
+  // $10,000 in cash" would read as a decision rather than an empty panel.
+  const plan = actionsData.scored ? actionsPlan() : null;
+
+  actionsBudgetEl.textContent = actionsData.budget
+    ? `${fmtUsd(actionsData.budget)} to work with`
+    : "";
+  actionsBudgetEl.title =
+    "A stand-in balance — the app doesn't know your real cash. The split " +
+    "between names is the answer; the dollars are a scale you can multiply.";
+
+  setActionsStatus(plan);
+  renderActionsSummary(plan);
+  renderActionsList(plan);
+}
+
+function setActionsStatus(plan) {
+  actionsStatusEl.className = "ai-status";
+  if (!actionsData.configured) {
+    actionsStatusEl.textContent =
+      "No AI model is configured, so there are no scores to act on.";
+    actionsStatusEl.className = "ai-status err";
+  } else if (actionsData.refreshing) {
+    actionsStatusEl.textContent =
+      "The AI columns are regenerating — this plan will follow them.";
+  } else if (!actionsData.scored) {
+    actionsStatusEl.textContent =
+      "No scores yet — refresh the AI Advisor and the plan appears here.";
+  } else if (plan && actionsData.generated_at) {
+    // Say what the plan is derived from, since it is only ever as fresh as the
+    // scores behind it.
+    actionsStatusEl.textContent =
+      `From the ${getRisk()}-risk scores of ${fmtUpdated(actionsData.generated_at)}` +
+      " — recomputed live against current prices.";
+  } else {
+    actionsStatusEl.textContent = "";
+  }
+}
+
+// The one line someone reads if they read nothing else: how many of each kind
+// of action, how much of the balance it puts to work, and what stays in cash.
+function renderActionsSummary(plan) {
+  if (!plan) {
+    // The status line above already says which empty case this is.
+    actionsSummaryEl.textContent = "";
+    actionsCashEl.innerHTML = "";
+    return;
+  }
+  const counts = [
+    plan.buys.length ? `<strong class="act-count buy">${plan.buys.length}</strong> to buy` : "",
+    plan.sells.length ? `<strong class="act-count sell">${plan.sells.length}</strong> to sell` : "",
+  ].filter(Boolean);
+
+  actionsSummaryEl.innerHTML = counts.length
+    ? counts.join(" · ")
+    : `No trade today — nothing beat leaving the money at ${fmt(
+        plan.cash_apr
+      )}%.`;
+
+  // Holding cash is a real outcome here, not a leftover, so it gets its own
+  // bar rather than being implied by the absence of rows.
+  const allocated = plan.allocated || 0;
+  const pct = actionsData.budget ? (allocated / actionsData.budget) * 100 : 0;
+  const proceeds = plan.sell_proceeds
+    ? `<span class="act-cash-sell" title="What the sells above would raise. Separate money — the buys are sized off the $10,000, not off this.">Sells would raise ${fmtUsd(
+        plan.sell_proceeds
+      )}</span>`
+    : "";
+  actionsCashEl.innerHTML = `
+    <div class="cash-bar" role="img"
+      aria-label="${Math.round(pct)}% of the balance deployed">
+      <span class="cash-bar-fill" style="width:${Math.max(0, Math.min(100, pct))}%"></span>
+    </div>
+    <div class="cash-legend">
+      <span class="act-cash-in">Deploying <strong>${fmtUsd(allocated)}</strong>
+        (${Math.round(pct)}%)</span>
+      <span class="act-cash-out" title="Not a leftover — money only leaves cash
+ when a name's conviction has earned it, and what stays behind keeps earning.">Keeping
+        <strong>${fmtUsd(plan.cash_remaining)}</strong> in cash at
+        ${fmt(plan.cash_apr)}% APR — earning ~${fmtUsd(
+    plan.cash_income_year
+  )}/yr</span>
+      ${proceeds}
+    </div>`;
+}
+
+function renderActionsList(plan) {
+  if (!plan) {
+    actionsListEl.innerHTML = `<p class="ai-empty">No actions yet.</p>`;
+    return;
+  }
+  if (!plan.total) {
+    // A day with nothing to do is a real answer. The cash line above already
+    // says where the money is instead, so this only has to say it plainly.
+    actionsListEl.innerHTML = `<p class="ai-empty">Nothing to trade today —
+      the whole balance stays where it is.</p>`;
+    return;
+  }
+  actionsListEl.innerHTML = ["buys", "sells"]
+    .map((kind) => {
+      const rows = plan[kind] || [];
+      if (!rows.length) return "";
+      return `<div class="act-group">
+        <span class="act-group-title ${ACTION_KINDS[kind].cls}">${actionGroupTitle(
+        kind,
+        rows.length
+      )}</span>
+        ${rows.map((item) => actionRow(item, kind)).join("")}
+      </div>`;
+    })
+    .join("");
+}
+
+function actionGroupTitle(kind, n) {
+  if (kind === "buys") return `Buy — ${n} ${n === 1 ? "name" : "names"}`;
+  return `Sell — ${n} ${n === 1 ? "position" : "positions"}`;
+}
+
+// One action item: the order on top, the reasoning behind a tap.
+function actionRow(item, kind) {
+  const meta = ACTION_KINDS[kind];
+  const ticker = escapeHtml(item.ticker);
+  const key = `${kind}:${item.ticker}`;
+  const open = openActionRows.has(key);
+  const s = item.suggestion || {};
+
+  return `<article class="act-row ${meta.cls}${open ? " open" : ""}">
+    <button type="button" class="act-head" data-act="${escapeHtml(key)}"
+      aria-expanded="${open ? "true" : "false"}"
+      title="Tap for the five agents' full reasoning on ${ticker}">
+      <span class="act-verb ${meta.cls}">${meta.verb}</span>
+      <span class="act-ticker">${ticker}</span>
+      <span class="act-size">${actionSize(item, kind)}</span>
+      ${scorePill(s)}
+      <span class="act-origin" title="Where this name came from">${escapeHtml(
+        item.origin_label || ""
+      )}</span>
+      <span class="act-caret" aria-hidden="true">${open ? "▾" : "▸"}</span>
+    </button>
+    ${
+      item.headline
+        ? `<p class="act-line">${escapeHtml(item.headline)}</p>`
+        : ""
+    }
+    ${
+      // Built only when open. A five-agent card is a few KB of markup, and
+      // eleven of them hidden behind a row nobody tapped is most of the panel.
+      open
+        ? `<div class="act-detail">
+             ${actionContext(item, kind)}
+             ${actionButtons(item, kind)}
+             ${detailCard(s, item.origin === "wishlist" ? "wishlist" : "holdings")}
+           </div>`
+        : ""
+    }
+  </article>`;
+}
+
+// The order itself, in the words the row is about: shares and dollars for a
+// buy, shares and what fraction of the position for a sell.
+function actionSize(item, kind) {
+  if (item.unpriced || item.shares == null) {
+    return `<span class="act-unpriced" title="No live quote, so this one can't
+ be turned into a share count">unpriced</span>`;
+  }
+  if (kind === "buys") {
+    return `<strong>${fmtShares(item.shares)}</strong> sh ·
+      <strong>$${fmt(item.cost)}</strong>`;
+  }
+  const all = item.sell_all ? " (all)" : ` (${item.sell_fraction}%)`;
+  const proceeds = item.proceeds == null ? "" : ` · ~$${fmt(item.proceeds)}`;
+  return `<strong>${fmtShares(item.shares)}</strong> sh${all}${proceeds}`;
+}
+
+// The facts that make a share count mean something: the price it was computed
+// at, what you already own, and how big a slice of the plan it is.
+function actionContext(item, kind) {
+  const bits = [];
+  if (item.price != null) bits.push(["Price", `$${fmt(item.price)}`]);
+  if (kind === "buys" && item.claim_pct != null) {
+    // Named as what it is: how much of the money it could have taken out of a
+    // 4.25% cash position this name's conviction actually justified.
+    bits.push([
+      `Claimed of its ${fmtUsd(actionsData.budget / actionsData.max_buys)} slice`,
+      `${fmtShares(item.claim_pct)}%`,
+    ]);
+  }
+  if (item.owned_shares) {
+    bits.push([
+      "You hold",
+      `${fmtShares(item.owned_shares)} sh @ $${fmt(item.owned_avg_price)}`,
+    ]);
+  }
+  bits.push(["Found via", item.origin_label || ""]);
+  if (item.horizon_months) bits.push(["Horizon", fmtHorizon(item)]);
+  return `<div class="act-facts">${bits
+    .map(
+      ([k, v]) =>
+        `<span><span class="act-fact-key">${escapeHtml(k)}</span>
+         ${escapeHtml(String(v))}</span>`
+    )
+    .join("")}</div>`;
+}
+
+// Acting on the plan without retyping it: the forms below are prefilled with
+// exactly the numbers on the row. Nothing is submitted for you — a suggestion
+// generated by a model should still take a deliberate click to become a trade.
+function actionButtons(item, kind) {
+  const ticker = escapeHtml(item.ticker);
+  const buttons = [];
+  if (kind === "buys" && item.shares != null) {
+    buttons.push(`<button type="button" data-act-buy="${ticker}"
+      title="Fill the Buy / Add Stock form with these numbers">
+      Prefill buy: ${fmtShares(item.shares)} sh @ $${fmt(item.price)}</button>`);
+  }
+  if (kind === "sells" && item.shares != null) {
+    buttons.push(`<button type="button" data-act-sell="${ticker}"
+      title="Fill the Sell Stock form with these numbers">
+      Prefill sell: ${fmtShares(item.shares)} sh @ $${fmt(item.price)}</button>`);
+  }
+  // A name found in the news is one you don't own and aren't watching yet, so
+  // "keep an eye on it" is a real second option alongside buying it now.
+  if (item.origin === "news") {
+    buttons.push(`<button type="button" data-act-wishlist="${ticker}"
+      title="Keep an eye on ${ticker} without buying it">＋ Wishlist</button>
+      <span class="message" data-act-msg="${ticker}"></span>`);
+  }
+  return buttons.length
+    ? `<div class="act-buttons">${buttons.join("")}</div>`
+    : "";
+}
+
+// Row clicks: expand/collapse, or act on the plan.
+actionsListEl.addEventListener("click", async (e) => {
+  const head = e.target.closest("[data-act]");
+  if (head) {
+    const key = head.getAttribute("data-act");
+    if (openActionRows.has(key)) openActionRows.delete(key);
+    else openActionRows.add(key);
+    renderActions();
+    return;
+  }
+
+  const buyBtn = e.target.closest("[data-act-buy]");
+  if (buyBtn) {
+    const item = findAction(buyBtn.getAttribute("data-act-buy"), "buys");
+    if (item) prefillBuy(item.ticker, item.shares, item.price);
+    return;
+  }
+
+  const sellBtn = e.target.closest("[data-act-sell]");
+  if (sellBtn) {
+    const item = findAction(sellBtn.getAttribute("data-act-sell"), "sells");
+    if (item) prefillSell(item.ticker, item.shares, item.price);
+    return;
+  }
+
+  const wishBtn = e.target.closest("[data-act-wishlist]");
+  if (!wishBtn) return;
+  const ticker = wishBtn.getAttribute("data-act-wishlist");
+  const msg = actionsListEl.querySelector(`[data-act-msg="${ticker}"]`);
+  wishBtn.disabled = true;
+  try {
+    const res = await fetch(WISHLIST_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (msg) setMessage(msg, data.error || "Could not add.", "err");
+      wishBtn.disabled = false;
+      return;
+    }
+    if (msg) setMessage(msg, "Added to wishlist.", "ok");
+    loadWishlist();
+  } catch {
+    if (msg) setMessage(msg, "Could not reach the API.", "err");
+    wishBtn.disabled = false;
+  }
+});
+
+function findAction(ticker, kind) {
+  const plan = actionsPlan();
+  return ((plan && plan[kind]) || []).find((i) => i.ticker === ticker) || null;
+}
+
+// Shares read badly at a fixed two decimals: 240 shares shouldn't be "240.00",
+// and a $4,000 stock's 0.0421 shares mustn't round to "0.04".
+function fmtShares(n) {
+  const v = Number(n);
+  if (!isFinite(v)) return "—";
+  const digits = v >= 100 ? 1 : v >= 1 ? 2 : 4;
+  return v.toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+// Whole dollars — the balance and its split are round-number figures, and
+// cents on a pretend $10,000 would imply a precision that isn't there.
+function fmtUsd(n) {
+  const v = Number(n);
+  if (!isFinite(v)) return "—";
+  return `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
 // --- Portfolios (switch / create / rename / delete) -------------------
 //
 // Each portfolio is a separate workspace on the server; the active one is
@@ -2388,6 +2787,7 @@ function renderPortfolios() {
   // portfolio list did.
   if (aiData) renderAI();
   if (discoverData) renderDiscover();
+  if (actionsData) renderActions();
 }
 
 // Return the entry for the currently active portfolio (for prefilling rename).
@@ -2412,11 +2812,14 @@ function reloadAllPanels() {
   newsDetailTicker = null;
   if (newsDetailsView) newsDetailsView.hidden = true;
   if (newsSummaryView) newsSummaryView.hidden = false;
+  // Expanded action rows belong to the portfolio being left behind.
+  openActionRows.clear();
   loadSummary();
   loadStocks();
   loadWishlist();
   loadAI();
   loadDiscover();
+  loadActions();
 }
 
 // Small POST helper for the portfolio endpoints: sends JSON, applies the
@@ -2514,3 +2917,4 @@ loadStocks();
 loadWishlist();
 loadAI();
 loadDiscover();
+loadActions();

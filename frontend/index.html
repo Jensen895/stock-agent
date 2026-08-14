@@ -141,6 +141,32 @@
       </div>
     </section>
 
+    <!-- AI ACTIONS (read only) — the step after the scoring: what to actually
+         do today, in shares, against a pretend $10,000. Every number here is
+         arithmetic over the suggestions the two AI columns already produced,
+         so it costs no model call and moves the instant a weight, a risk
+         setting or a price does. -->
+    <section class="card actions-card">
+      <div class="section-head">
+        <h2 title="What the agents' scores imply you should do right now, sized in shares against a pretend $10,000 cash balance. Buys come from your holdings, your wishlist and the In the News column — whichever score as a genuine buy. Nothing has to be spent: uninvested money earns 4.25% APR, so a name only takes cash when its conviction has earned it, and what stays behind keeps paying. No model runs to produce this; it is the same scores you see in the AI columns, turned into orders.">🎯 AI Actions</h2>
+        <span id="actions-budget" class="actions-budget">—</span>
+      </div>
+      <p class="hint">What to do now, sized against a dummy $10,000 — the app
+        doesn't know your real balance, so read the proportions rather than the
+        dollars. Spending it all is never the goal: idle cash earns 4.25% APR,
+        which is the bar a buy has to clear. Follows the AI Advisor's risk
+        toggle. Tap any row for the full reasoning.</p>
+
+      <p id="actions-summary" class="actions-summary">Loading…</p>
+      <div id="actions-cash" class="actions-cash"></div>
+      <p id="actions-status" class="ai-status" role="status"></p>
+
+      <div id="actions-list" class="actions-list"></div>
+
+      <p class="ai-disclaimer">AI-generated on imaginary money. Not financial
+        advice — verify before you trade.</p>
+    </section>
+
     <!-- BUY / ADD STOCK (write) -->
     <section class="card">
       <h2>Buy / Add Stock</h2>

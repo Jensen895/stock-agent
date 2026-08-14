@@ -73,7 +73,11 @@ everything goes through the API — so either side can be swapped independently.
   role, a system prompt, and (crucially) a **disjoint slice** of the evidence:
   company perspective, your own position and price history, raw statistics,
   Wall Street, and macro/policy. This module decides who may see what; adding a
-  sixth agent is adding a class here.
+  sixth agent is adding a class here. It also holds the one fact every agent is
+  told regardless of dimension: **cash pays 4.25% APR** (`CASH_APR_PCT`). Doing
+  nothing is not a zero, so the bar for a buy is "beats a risk-free ~1.06% over
+  a quarter", staying out is a real answer, and a stock expected to go nowhere
+  scores *below* 50 instead of at it.
 - **AI advisor layer** (`backend/ai_advisor.py`) — the orchestration. Gathers
   the evidence once, runs the five agents concurrently over their own slices,
   and averages their scores with the per-portfolio weights into **one 0-100
@@ -104,6 +108,18 @@ everything goes through the API — so either side can be swapped independently.
   decision: a stock found on Reddit and a stock you've held for a year get
   comparable numbers, instead of the discovery panel having its own private
   notion of a good idea. Served over `/api/discover`.
+
+- **Actions layer** (`backend/actions.py`) — the last step, and the only one
+  that produces an *instruction*. Every other AI layer stops at a score;
+  `AiActionsService` turns those same cached scores into a short list of orders
+  sized in shares against a **dummy $10,000** cash balance — what to buy, how
+  much of it, what to sell, and what to leave alone. Spending it is never the
+  goal: the unspent part earns 4.25% and is reported as a position, so a name
+  only takes money out of cash when its conviction has earned it. It calls
+  **no model** and
+  stores nothing: like the agent-weight sliders, it is arithmetic over
+  suggestions the advisor and discover panels already made, so it is instant,
+  free, and re-derived on every request. Served over `/api/actions`.
 
 ### Why it's flexible / reusable
 
@@ -709,6 +725,86 @@ User-Agent you send; the retail lane then falls through to StockTwits, and the
 header reports which source actually spoke along with how many headlines each
 lane returned. A blocked feed shows as a `0` you can see rather than a lane that
 silently contributed nothing.
+
+### AI Actions
+
+Sits directly under the dashboard, above the Buy / Add form it prefills, so the
+page reads: **what am I worth → what should I do → do it.**
+
+```
+GET  /api/actions            -> the sized plan, both risk profiles
+```
+
+Every other AI panel answers *how strongly do the agents feel about this
+stock?* and stops there. A 78/100 is a view, not an instruction: it doesn't say
+whether to act today, and it certainly doesn't say **how many shares**. This
+panel is the last step — it turns the scores already on screen into orders.
+
+**The money is pretend.** The app doesn't know your brokerage balance and
+deliberately doesn't ask, so the plan is sized against a flat **$10,000**. Read
+the *proportions* as the answer and the dollars as a scale you multiply. Change
+it by passing `budget=` to `AiActionsService` in `run.py`.
+
+**No model is called.** The plan is re-derived per request from the cached
+suggestions, exactly like the weight sliders — instant, free, and never fresher
+than the columns it reads from. Move a weight and the allocation moves with it;
+that is most of the reason the sliders are interesting.
+
+**Where the candidates come from** (per risk profile — it follows the AI
+Advisor's toggle):
+
+| | |
+|---|---|
+| **Buy** | advisor holdings scored `buy`, advisor **wishlist** buys, and **In the News** picks scored `buy`. Deduped by ticker (highest score wins), ranked by score, capped at 5. |
+| **Sell** | positions you actually hold that scored `trim` or `sell`, worst first, capped at 3. A `trim` on a stock you don't own is "don't enter" — not an order, so it produces no row. |
+
+Those two, and nothing else. A name the agents landed on neutral doesn't appear:
+"wait" is the absence of an action, and a list of things *not* to do buries the
+two or three that need doing. Those names are still on screen — scored, in the
+AI Advisor column — where reading them is a deliberate act rather than
+something you scroll past to reach the orders.
+
+**Cash pays, so nothing has to be spent.** Uninvested money sits at
+**4.25% APR** (`CASH_APR_PCT`, defined once in `ai_agents.py`), risk-free and
+liquid. That single number does two jobs: it is written into **every agent's
+prompt**, so a buy has to clear "beats a guaranteed ~1.06% over a quarter"
+rather than merely "goes up", and it prices what the plan holds back, so
+leftover money is reported as a position with a yield rather than an allocator
+that ran out of ideas. The line above the list says it every time — *Deploying
+$3,753 (38%) · Keeping $6,247 in cash at 4.25% APR — earning ~$265/yr* — and on
+a day nothing clears the bar, that line is the whole plan.
+
+**Sizing.** Each buy may claim at most an equal slice of the balance, and takes
+only the part of it its conviction has earned:
+
+```
+slice    = $10,000 / 5                       = $2,000
+claim    = (confidence − 55) / (85 − 55)       capped at 1.0
+deployed = slice × claim
+```
+
+An 85+ takes its whole slice; a 60, barely over the buy floor, takes a sixth of
+it and leaves the rest earning 4.25%. Everything unclaimed — by weak scores, by
+there being two buys instead of five, or by there being none — stays in cash. In
+practice a low-risk day on a 23-stock portfolio deploys around a third of the
+balance and a high-risk one about half, which is the point: the plan is allowed
+to disagree with the idea that money must be working.
+
+Sells are sized off the position you hold, on the mirror scale — a quarter of it
+just under the hold band, all of it once the score reaches the low teens. A name
+with no live quote is listed **unpriced** and its dollars stay in cash rather
+than being guessed at.
+
+The score is a conviction reading, not a forecast return, so none of this claims
+to compare an expected gain against 4.25% arithmetically. The rate sets the bar
+and prices the wait; the ramp is the honest way to spend against a number that
+isn't a return.
+
+**Tap a row** for the same five-agent breakdown the AI Advisor shows, plus the
+price the order was sized at, what you already hold, and a button that prefills
+the Buy or Sell form with exactly those numbers. Nothing is ever submitted for
+you — a model's suggestion should still take a deliberate click to become a
+trade.
 
 ## Run it
 

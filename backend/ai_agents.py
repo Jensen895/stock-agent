@@ -62,6 +62,14 @@ conviction to sell. An agent whose own evidence says nothing about a ticker is
 told to score it near 50 rather than borrow conviction it hasn't earned, which
 keeps a quiet dimension from dragging the average around.
 
+One other thing is shared, and it is deliberately not evidence: every agent is
+told what **cash** pays (``CASH_APR_PCT``). Doing nothing is not a zero — it
+earns a risk-free yield — so "beats a savings account over a quarter" is the
+bar a buy has to clear, and staying out is an answer rather than a missing one.
+Without it the models score as though the investor were obliged to be fully
+invested, and a stock expected to go nowhere comes back as a 50 instead of the
+loss against cash that it is.
+
 Adding a sixth agent means adding a class here with a ``role``, a ``payload``
 and an entry in ``AGENTS``. Nothing in ``ai_advisor.py`` enumerates the five.
 """
@@ -109,6 +117,40 @@ _SCALE = (
     "genuine conviction, but do not park everything near 50 to hedge either. "
     "Give the matching 'action' label too, and make sure the two agree: 'buy' "
     "above 55, 'hold' 45-55, 'trim' 20-45, 'sell' below 25."
+)
+
+# What uninvested money earns while it waits — the single source of truth for
+# the whole app. It is in this module because it belongs in every agent's
+# prompt: it changes what a "buy" has to clear. ``actions.py`` imports it from
+# here to price the cash its plan deliberately leaves unspent.
+#
+# 4.25% is a stand-in for a high-yield savings / money-market rate. Change this
+# one number when rates move and both the prompts and the plan follow.
+CASH_APR_PCT = 4.25
+
+# The alternative every buy is actually competing with. Without this the models
+# use "will it go up" as the bar, which is the wrong bar — doing nothing is not
+# a zero, it pays — and they answer as if the investor were obliged to be fully
+# invested, which they are not.
+_CASH = (
+    "CASH IS A REAL ALTERNATIVE, AND IT PAYS. Any money not in a stock sits in "
+    f"a liquid account earning about {CASH_APR_PCT:g}% APR — roughly "
+    f"{CASH_APR_PCT / 12:.2f}% a month, {CASH_APR_PCT / 4:.2f}% over a quarter "
+    "— risk-free, and available the moment something better turns up.\n"
+    "Three consequences for your score:\n"
+    "  - The bar for a buy is not 'will this rise'. It is 'does MY evidence say "
+    "this beats a guaranteed "
+    f"{CASH_APR_PCT / 4:.2f}% over one to three months, given the risk it "
+    "carries'. A name you expect to drift sideways is WORSE than cash, not "
+    "equal to it — score it below 50 rather than at it.\n"
+    "  - Nobody has to spend anything. Staying in cash and waiting for a better "
+    "entry is a legitimate, profitable outcome, not a failure to have an "
+    "opinion. When that is what your evidence supports, say so plainly instead "
+    "of manufacturing a buy to look useful.\n"
+    "  - Do not ration. You are not allocating a budget, competing with the "
+    "other agents for it, or deciding position sizes — score every ticker on "
+    "its own merits against cash and let the weighting system downstream decide "
+    "what actually gets bought and how much."
 )
 
 # The shape of the answer. Identical for every agent so one JSON schema and one
@@ -264,6 +306,7 @@ class Agent:
             f"{_KIND_FRAME[kind]}\n\n"
             f"{_INDEPENDENCE}\n\n"
             f"{_SCALE}\n\n"
+            f"{_CASH}\n\n"
             f"{_OUTPUT}"
         )
 

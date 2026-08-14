@@ -426,6 +426,187 @@ td.num .cell-stack { align-items: flex-end; }
 #stocks-table .link-btn,
 #wishlist-table .link-btn { padding: 0.15rem 0.28rem; font-size: 0.8rem; }
 
+/* --- AI Actions -------------------------------------------------------- */
+/* The plan sits directly under the dashboard, above the forms it prefills, so
+   the reading order is: what am I worth -> what should I do -> do it.
+
+   It borrows the AI columns' vocabulary wholesale (score pills, meters, action
+   colours, the five-agent detail card) because it is showing the same numbers
+   in a different form. A second visual language for the same scores would
+   suggest a second opinion, and there isn't one. */
+
+.actions-card .section-head { margin-bottom: 0.5rem; }
+
+.actions-budget {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.actions-summary {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+  color: var(--muted);
+}
+.actions-summary:empty { display: none; }
+.actions-summary .act-count { font-size: 1.15rem; }
+.act-count.buy { color: var(--ok); }
+.act-count.sell { color: var(--err); }
+
+/* Holding cash is an outcome the plan chose, not what happened to be left
+   over, so it gets a bar of its own rather than being inferred from the rows. */
+.cash-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+}
+.cash-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+.cash-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0.4rem 0 0.75rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.act-cash-in strong { color: var(--accent); }
+.act-cash-out strong { color: var(--text); }
+.act-cash-sell { color: var(--ok); }
+
+.actions-list { display: flex; flex-direction: column; gap: 1rem; }
+.act-group { display: flex; flex-direction: column; gap: 0.5rem; }
+.act-group-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+}
+.act-group-title.buy { color: var(--ok); }
+.act-group-title.sell { color: var(--err); }
+
+/* One order. The left border carries the verb's colour so a scan down the
+   list reads as buy/sell/wait without touching the words. */
+.act-row {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 0.6rem 0.75rem;
+}
+.act-row.buy { border-left-color: var(--ok); }
+.act-row.sell { border-left-color: var(--err); }
+.act-row.open { border-color: var(--accent); }
+
+/* The whole header is the tap target — a small caret would be a worse one. */
+.act-head {
+  grid-column: auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.act-head:hover { background: transparent; }
+.act-head:hover .act-ticker { color: var(--accent); }
+
+.act-verb {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+}
+.act-verb.buy { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+.act-verb.sell { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+
+.act-ticker { font-weight: 700; letter-spacing: 0.02em; }
+.act-size { font-variant-numeric: tabular-nums; }
+.act-size strong { font-weight: 700; }
+.act-unpriced { color: var(--muted); font-style: italic; }
+
+/* Pushed right so the tap target's left edge stays the order itself. */
+.act-origin {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+.act-caret { color: var(--muted); font-size: 0.8rem; }
+
+.act-line {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
+.act-detail { margin-top: 0.75rem; }
+
+/* The numbers that make a share count mean something — the price it was sized
+   at, what you already hold, how big a slice of the plan it is. */
+.act-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  font-size: 0.8rem;
+  color: var(--text);
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.act-fact-key { color: var(--muted); margin-right: 0.25rem; }
+
+.act-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.6rem 0;
+}
+.act-buttons button {
+  grid-column: auto;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+.act-buttons button:hover { background: var(--card); }
+.act-buttons .message { min-height: 0; margin: 0; font-size: 0.82rem; }
+
+/* The detail card is the AI Advisor's, reused verbatim. It was written for a
+   370px column, so inside this much wider one it only needs its box back. */
+.act-detail .ai-detail {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  background: var(--card);
+}
+
+.actions-card .ai-disclaimer { margin-bottom: 0; }
+
 /* Not enough room for three columns: fold the news panel above the portfolio.
    Still the first thing in the left region, just stacked rather than beside —
    the AI column is untouched and stays where it is.

@@ -29,6 +29,12 @@ Endpoints:
                                about, what the company is, and the same
                                five-agent confidence score as everything else
   POST   /api/discover/refresh -> trigger a background regeneration of picks
+  GET    /api/actions       -> what to do now on a dummy $10,000 (read only)
+                               buys sized in shares, sells sized against the
+                               position, and the names to wait on — one plan
+                               per risk profile. Derived from the suggestions
+                               the advisor and discover panels already made, so
+                               no model is called and it is always instant.
   POST   /api/ai/weights    -> set how much each AI agent counts     (write)
                                body: {"weights": {"<agent key>": number, ...}}
                                Re-blends the cached scores immediately and
@@ -80,6 +86,7 @@ def make_handler(
     advisor=None,
     workspace=None,
     discover=None,
+    actions=None,
 ):
     """Build a request handler bound to the given service instances."""
 
@@ -114,6 +121,13 @@ def make_handler(
                     )
                 else:
                     self._send_json(200, discover.get())
+            elif self.path == "/api/actions":
+                # The sized plan. Recomputed per request from the cached
+                # scores — cheap enough that there is nothing to invalidate.
+                if actions is None:
+                    self._send_json(200, {"configured": False, "plans": None})
+                else:
+                    self._send_json(200, actions.get())
             elif self.path == "/api/portfolios":
                 # Every portfolio + which one is active (the app's "memory").
                 if workspace is None:
@@ -318,11 +332,12 @@ def run_server(
     advisor=None,
     workspace=None,
     discover=None,
+    actions=None,
     host: str = "127.0.0.1",
     port: int = 8000,
 ):
     handler = make_handler(
-        portfolio, wishlist, summary, market, advisor, workspace, discover
+        portfolio, wishlist, summary, market, advisor, workspace, discover, actions
     )
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"Stock assistant running at http://{host}:{port}")
