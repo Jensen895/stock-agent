@@ -123,12 +123,26 @@ h1 { margin: 0; font-size: 1.75rem; }
   letter-spacing: 0.03em;
 }
 
-/* Total worth: the biggest text on the page, always green. */
-.total-worth {
-  text-align: center;
+/* The two headline figures side by side: what you own, and what you have left
+   to buy with. A divider between them, because they are different kinds of
+   money — one is committed, the other is not. */
+.worth-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: start;
+  gap: 1.5rem;
   padding-bottom: 1.25rem;
   margin-bottom: 1.25rem;
   border-bottom: 1px solid var(--border);
+}
+.worth-row > * + * {
+  border-left: 1px solid var(--border);
+  padding-left: 1.5rem;
+}
+
+/* Total worth: the biggest text on the page, always green. */
+.total-worth {
+  text-align: center;
 }
 .worth-value {
   display: block;
@@ -138,6 +152,78 @@ h1 { margin: 0; font-size: 1.75rem; }
   line-height: 1.1;
   color: var(--ok);
   font-variant-numeric: tabular-nums;
+}
+
+/* --- Available to trade ----------------------------------------------- */
+
+.available-worth { text-align: center; }
+
+/* Uncommitted money, so it reads in the neutral text colour rather than the
+   green reserved for what the holdings are worth. Slightly smaller too: it is
+   the second figure in the block, not a rival headline. */
+.available-value {
+  font-size: 2.25rem;
+  color: var(--text);
+}
+/* Vacant: nothing has been entered. Muted and lighter, so an empty section
+   looks like a question rather than a balance of zero. */
+.available-value.vacant {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 1.5rem;
+}
+/* An actual zero, which is a real answer and worth noticing. */
+.available-value.empty { color: var(--err); }
+
+.available-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 0.45rem;
+}
+/* Opt out of the global three-column form grid — this one is a stacked pair
+   (the amount, then Save/Cancel), not a row of fields. */
+.available-form {
+  display: block;
+  margin-top: 0.35rem;
+}
+.available-input {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+.available-currency {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+.available-input input {
+  width: 9rem;
+  font-size: 1.5rem;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.available-save {
+  padding: 0.35rem 0.9rem;
+  font-size: 0.85rem;
+}
+.available-worth .message {
+  margin: 0.5rem 0 0;
+  min-height: 0;
+  font-size: 0.78rem;
+}
+.available-worth .message:empty { display: none; }
+
+@media (max-width: 700px) {
+  .worth-row { grid-template-columns: 1fr; }
+  .worth-row > * + * {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    padding-left: 0;
+    padding-top: 1.25rem;
+  }
 }
 
 .gains-grid {

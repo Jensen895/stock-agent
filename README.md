@@ -29,11 +29,14 @@ everything goes through the API — so either side can be swapped independently.
 - **API layer** (`backend/server.py`) — the only bridge. Exposes a REST API.
 - **Business logic** (`backend/service.py`) — accumulation + weighted-average
   price, plus `MarketService`, which enriches holdings/wishlist with live prices
-  and computes real unrealized gains. Independent of UI and storage.
+  and computes real unrealized gains, and `AvailableCashService`, the one figure
+  the app can't derive: how much cash you have to buy with, entered by hand and
+  **vacant** until you do. Independent of UI and storage.
 - **Storage layer** (`backend/storage/`) — an abstract `StorageBackend`
   interface plus a local `JSONStorage` implementation.
 - **Portfolios layer** (`backend/workspace.py`) — lets you keep several separate
-  portfolios (holdings + wishlist + sales + AI suggestions + agent weights each),
+  portfolios (holdings + wishlist + sales + AI suggestions + agent weights +
+  available-to-trade balance each),
   switch between them, and name/create/delete them. `WorkspaceManager` tracks which portfolio is
   active and **persists that choice**, so the app reopens on whichever one you
   last used. `WorkspaceStorage` is a `StorageBackend` that redirects every read/
@@ -73,11 +76,24 @@ everything goes through the API — so either side can be swapped independently.
   role, a system prompt, and (crucially) a **disjoint slice** of the evidence:
   company perspective, your own position and price history, raw statistics,
   Wall Street, and macro/policy. This module decides who may see what; adding a
-  sixth agent is adding a class here. It also holds the one fact every agent is
-  told regardless of dimension: **cash pays 4.25% APR** (`CASH_APR_PCT`). Doing
-  nothing is not a zero, so the bar for a buy is "beats a risk-free ~1.06% over
-  a quarter", staying out is a real answer, and a stock expected to go nowhere
-  scores *below* 50 instead of at it.
+  sixth agent is adding a class here. It also holds the two things every agent
+  is told regardless of dimension — both constraints rather than evidence, and
+  both given identically to all five, so the disjoint-evidence split is
+  untouched:
+  - **Cash pays 4.25% APR** (`CASH_APR_PCT`). Doing nothing is not a zero, so
+    the bar for a buy is "beats a risk-free ~1.06% over a quarter", staying out
+    is a real answer, and a stock expected to go nowhere scores *below* 50
+    instead of at it.
+  - **How much cash there is** (`available_cash_note`), when
+    [Available to trade](#available-to-trade) has been filled in. Not evidence
+    about any company — the *size of the decision*. The same 60/100 means
+    something different against $500 than against $500,000: at the small end a
+    single share of an expensive name is the whole position, and a marginal buy
+    costs the chance to take the good one that turns up next week. The note
+    reinforces "do not ration" rather than relaxing it — the agents still score
+    each ticker on its own merits and never name dollar amounts, because
+    `actions.py` does the sizing against that same figure. Vacant omits the
+    line entirely, leaving prompts exactly as they were.
 - **AI advisor layer** (`backend/ai_advisor.py`) — the orchestration. Gathers
   the evidence once, runs the five agents concurrently over their own slices,
   and averages their scores with the per-portfolio weights into **one 0-100
@@ -162,15 +178,18 @@ the next earnings date.
 
 ### Dashboard
 
-| Method | Path           | Purpose                                  | Body |
-| ------ | -------------- | ---------------------------------------- | ---- |
-| GET    | `/api/summary` | Total worth + realized/unrealized gains  | —    |
+| Method | Path             | Purpose                                        | Body                  |
+| ------ | ---------------- | ---------------------------------------------- | --------------------- |
+| GET    | `/api/summary`   | Total worth + available + realized/unrealized  | —                     |
+| POST   | `/api/available` | Set the cash available to trade                | `{"amount": 2500}`    |
+| DELETE | `/api/available` | Remove it — the section goes vacant            | —                     |
 
 `/api/summary` returns:
 
 ```jsonc
 {
   "total_worth": 2856.45,             // sum of shares * avg_price across holdings
+  "available": { "amount": 2500.0, "vacant": false },  // or {"amount": null, "vacant": true}
   "realized":   { "1d": 0, "1w": 0, "1m": 0, "ytd": 0, "1y": 0 },
   "unrealized": {                     // REAL data, from live prices
     "1d":    { "value": 65.28,   "pct": 2.16,  "series": [ { "t": "…", "v": -22.9 }, … ] },
@@ -187,6 +206,40 @@ the next earnings date.
 
 - **Total stock worth** — the sum of every holding's cost basis
   (`shares * avg_price`). Shown as the largest text in the UI, in green.
+
+<a id="available-to-trade"></a>
+
+- **Available to trade** — sits immediately to the right of total worth, and is
+  the only writable thing on the dashboard. The two belong side by side: one is
+  money you've committed, the other is money you haven't, and a buy moves both
+  at once in opposite directions.
+
+  This is the one figure the app **cannot derive**. Holdings, gains and realized
+  returns all fall out of what's been recorded; the cash sitting in a brokerage
+  account waiting to be spent is known only because you said so. So it has
+  three states, not two, and the difference between the last two is
+  load-bearing:
+
+  | State | Means | What the app does |
+  |---|---|---|
+  | **vacant** | Never entered, or removed. **The default.** | Nothing is assumed. AI Actions falls back to its stand-in $10,000 and labels it; the agents are told nothing about a budget and score exactly as they did before this existed. |
+  | **$0** | "I have nothing to invest right now." | A real instruction. No buys are sized at all, and the agents are told the balance is zero — which makes them firmer about names they've gone cold on, since selling is the only way into a better position. |
+  | **$n** | Real money. | AI Actions is sized against it, and every agent is told what there is to spend when it scores. |
+
+  Clearing the input and saving is the same as pressing **Remove** — both land
+  on *vacant*, so "delete the number" never quietly means zero. On disk the key
+  is deleted rather than set to `0`, so the two can't be confused on the next
+  read.
+
+  **Buying subtracts automatically.** Every `POST /api/stocks` draws
+  `shares × price` out of the balance, floored at zero — running it out means
+  "nothing left to deploy", and a negative number would assert a debt the app
+  has no way to know about. Selling does **not** credit it back: those proceeds
+  land in an account the app can't see, and crediting them would turn a
+  note-to-self into a ledger claiming to track the real thing.
+
+  Per-portfolio, like everything else (`available.json`), because the money is:
+  a speculative account and a retirement account have different amounts free.
 - **Realized gains** — summed from the sales log. Each sell records
   `(sale_price - avg_price) * shares` with a UTC timestamp; the summary buckets
   those into rolling windows (1D / 1W / 1M / YTD / 1Y). Green when positive, red
@@ -740,10 +793,27 @@ stock?* and stops there. A 78/100 is a view, not an instruction: it doesn't say
 whether to act today, and it certainly doesn't say **how many shares**. This
 panel is the last step — it turns the scores already on screen into orders.
 
-**The money is pretend.** The app doesn't know your brokerage balance and
-deliberately doesn't ask, so the plan is sized against a flat **$10,000**. Read
-the *proportions* as the answer and the dollars as a scale you multiply. Change
-it by passing `budget=` to `AiActionsService` in `run.py`.
+**The money is yours if you say so.** The plan is sized against
+[**Available to trade**](#available-to-trade) — the balance you enter on the
+dashboard. Then the share counts are orders you could actually place, and
+buying one draws the balance down so the next plan is sized against what's
+left.
+
+Leave that section empty and the app makes no assumption about your brokerage
+balance: it falls back to a flat **$10,000**, labels the chip
+*"(stand-in)"*, and you read the *proportions* as the answer and the dollars as
+a scale you multiply. Change the fallback by passing `budget=` to
+`AiActionsService` in `run.py`. The payload says which was used:
+
+```jsonc
+"budget": 2500.0,
+"budget_source": "available"     // or "placeholder" while the section is vacant
+```
+
+A balance of exactly **$0** is neither of those — it is a real instruction. The
+plan sizes no buys at all (`"no_cash": true` on each plan), says so in place of
+the cash bar, and keeps showing sells, because selling is how you get cash when
+you have none.
 
 **No model is called.** The plan is re-derived per request from the cached
 suggestions, exactly like the weight sliders — instant, free, and never fresher
@@ -778,7 +848,7 @@ a day nothing clears the bar, that line is the whole plan.
 only the part of it its conviction has earned:
 
 ```
-slice    = $10,000 / 5                       = $2,000
+slice    = balance / 5                  ($2,000 of a $10,000 balance)
 claim    = (confidence − 55) / (85 − 55)       capped at 1.0
 deployed = slice × claim
 ```
@@ -956,10 +1026,12 @@ Live prices, history, and earnings dates are fetched from Yahoo Finance, so an
 internet connection is needed for those. If the network (or Yahoo) is
 unavailable, the app still runs — live fields just show "—" until it recovers.
 
-Holdings, wishlist, sales log, AI suggestions, and the agent weights are stored
-locally, one set per portfolio, under `data/portfolios/<id>/`
-(`portfolio.json`, `wishlist.json`, `sales.json`, `ai_suggestions.json`,
-`ai_weights.json`) — separate tables. Which portfolios exist
+Holdings, wishlist, sales log, AI suggestions, the agent weights, and the
+available-to-trade balance are stored locally, one set per portfolio, under
+`data/portfolios/<id>/` (`portfolio.json`, `wishlist.json`, `sales.json`,
+`ai_suggestions.json`, `ai_weights.json`, `available.json`) — separate tables.
+`available.json` is simply absent until you enter a balance, which is how the
+app tells *vacant* from *$0*. Which portfolios exist
 and which one is active live in `data/portfolios/index.json`. Older single-
 portfolio installs (with the files directly under `data/`) are migrated into a
 first **"My Portfolio"** automatically on first launch, so no history is lost.
@@ -970,8 +1042,9 @@ Keep several separate portfolios and switch between them from the dropdown at th
 top center of the page. Each is its own workspace — holdings, wishlist, sales,
 and AI suggestions never mix — and every action is saved immediately. The app
 remembers the portfolio you were last viewing and reopens on it. Each portfolio
-also remembers **its own AI-advisor risk toggle** (low / high) and **its own
-agent weights**, so switching portfolios restores both.
+also remembers **its own AI-advisor risk toggle** (low / high), **its own agent
+weights**, and **its own available-to-trade balance**, so switching portfolios
+restores all three.
 
 | Method | Path                      | Purpose                                | Body            |
 | ------ | ------------------------- | -------------------------------------- | --------------- |

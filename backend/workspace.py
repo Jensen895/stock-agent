@@ -22,6 +22,7 @@ On-disk layout (all under ``data/``)::
           ai_suggestions.json
           ai_weights.json         # how much each AI agent counts
           discover.json           # trending stocks you don't own or watch
+          available.json          # cash available to trade (absent = vacant)
         _archive/                 # deleted portfolios are moved here, never erased
 
 The active portfolio id is persisted in ``index.json``, so restarting the app
@@ -49,6 +50,11 @@ from backend.storage import JSONStorage, StorageBackend
 # about that this portfolio neither holds nor watches. Per-portfolio because
 # the exclusions are: the same three names are a discovery for one portfolio
 # and old news for another that already owns them.
+# ``available.json`` holds the "available to trade" balance — the cash on hand
+# to buy with. Per-portfolio because the money is: a speculative account and a
+# retirement account have different amounts free, and the AI Actions plan is
+# sized against whichever portfolio you are looking at. Absent until entered,
+# which is exactly how the app tells "vacant" from "$0".
 DATA_FILES = (
     "portfolio.json",
     "wishlist.json",
@@ -56,6 +62,7 @@ DATA_FILES = (
     "ai_suggestions.json",
     "ai_weights.json",
     "discover.json",
+    "available.json",
 )
 
 # Each portfolio remembers its own AI-advisor risk toggle (which risk profile the

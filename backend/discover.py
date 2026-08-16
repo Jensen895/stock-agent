@@ -394,9 +394,17 @@ class DiscoverService:
         and the portfolio-level figures are absent, which is correct: these
         stocks have nothing to do with the investor's book, and the personal
         agent should be reading the price pattern alone.
+
+        ``available_cash`` is the exception, and it is here deliberately. A
+        stock found in the news competes for the same money as one already on
+        the wishlist, so leaving it out would mean the constraint applied to
+        two of the three columns and this one scored as though capital were
+        free — which is precisely the column most likely to talk you into
+        something. None while the section is vacant.
         """
         return {
             "as_of": _now_iso(),
+            "available_cash": self.advisor.available_cash(),
             "macro_news": self._safely(
                 lambda: (
                     self.advisor.macro_news.get_macro_news()

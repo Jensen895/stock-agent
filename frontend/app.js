@@ -3,6 +3,7 @@
 const STOCKS_API = "/api/stocks";
 const WISHLIST_API = "/api/wishlist";
 const SUMMARY_API = "/api/summary";
+const AVAILABLE_API = "/api/available";
 const AI_API = "/api/ai";
 
 // --- Dashboard: total worth + realized/unrealized gains (read only) ----
@@ -45,10 +46,152 @@ async function loadSummary() {
 function renderSummary() {
   if (!summaryData) return;
   totalWorthEl.textContent = `$${fmt(summaryData.total_worth)}`;
+  // The balance travels with the summary because it sits in the same block and
+  // a buy moves both — one read keeps them from disagreeing for a frame.
+  applyAvailable(summaryData.available);
   buildIntervalToggles();
   renderRealized();
   renderUnrealized();
 }
+
+// --- Available to trade (read + write) --------------------------------
+//
+// The one figure on the dashboard the app can't work out for itself, so it is
+// typed in — and left blank until it is. Blank is a real state ("vacant"), not
+// a zero, and the difference is load-bearing:
+//
+//   vacant  Nothing entered. The AI Actions plan falls back to its stand-in
+//           $10,000 and says so, and the agents are told nothing about a
+//           budget. This is the default and costs nothing to stay in.
+//   $0      Entered, and empty. A real instruction: nothing can be bought, and
+//           the plan sizes no buys at all.
+//   $n      Real money. The plan is sized against it and the agents are told
+//           what there is to spend when they score.
+//
+// Clearing the input and saving removes the figure, so "delete the number" and
+// "press Remove" land in the same place — vacant — rather than one of them
+// quietly meaning zero.
+
+const availableViewEl = document.getElementById("available-view");
+const availableValueEl = document.getElementById("available-value");
+const availableEditBtn = document.getElementById("available-edit");
+const availableRemoveBtn = document.getElementById("available-remove");
+const availableForm = document.getElementById("available-form");
+const availableInput = document.getElementById("available-input");
+const availableCancelBtn = document.getElementById("available-cancel");
+const availableMsg = document.getElementById("available-message");
+
+let availableState = { amount: null, vacant: true };
+let availableEditing = false;
+
+function applyAvailable(state) {
+  availableState = state || { amount: null, vacant: true };
+  renderAvailable();
+}
+
+function renderAvailable() {
+  const vacant = availableState.vacant || availableState.amount == null;
+
+  availableForm.hidden = !availableEditing;
+  availableViewEl.hidden = availableEditing;
+  if (availableEditing) return;
+
+  availableValueEl.textContent = vacant ? "Not set" : `$${fmt(availableState.amount)}`;
+  // Three looks for three states: quiet grey for a question nobody has
+  // answered, red for a balance that has actually run out, plain text for a
+  // real figure.
+  availableValueEl.classList.toggle("vacant", vacant);
+  availableValueEl.classList.toggle("empty", !vacant && availableState.amount === 0);
+  availableValueEl.title = vacant
+    ? "Not set — the app makes no assumption about your balance, and the AI " +
+      "Actions plan uses a stand-in $10,000."
+    : "The AI Actions plan is sized against this, and every agent is told it " +
+      "when it scores. Buying subtracts what the buy cost.";
+
+  availableEditBtn.textContent = vacant ? "Set" : "Edit";
+  availableRemoveBtn.hidden = vacant;
+}
+
+function startAvailableEdit() {
+  availableEditing = true;
+  setMessage(availableMsg, "", "");
+  renderAvailable();
+  availableInput.value =
+    availableState.amount == null ? "" : String(availableState.amount);
+  availableInput.focus();
+  availableInput.select();
+}
+
+function cancelAvailableEdit() {
+  availableEditing = false;
+  setMessage(availableMsg, "", "");
+  renderAvailable();
+}
+
+// Send the change, apply what comes back, and resize the plan. The AI Actions
+// panel is sized against this figure server-side, so it has to be re-read; the
+// *scores* aren't, which is why a real change says to refresh the advisor
+// rather than pretending the agents already knew.
+async function saveAvailable(body, method) {
+  try {
+    const res = await fetch(AVAILABLE_API, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setMessage(availableMsg, data.error || "Could not save.", "err");
+      return false;
+    }
+    availableEditing = false;
+    applyAvailable(data.available);
+    if (summaryData) summaryData.available = data.available;
+    loadActions();
+    return true;
+  } catch {
+    setMessage(availableMsg, "Could not reach the API.", "err");
+    return false;
+  }
+}
+
+availableEditBtn.addEventListener("click", startAvailableEdit);
+availableCancelBtn.addEventListener("click", cancelAvailableEdit);
+
+availableForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  setMessage(availableMsg, "", "");
+  const raw = availableInput.value.trim();
+
+  // An emptied box means "I don't want a figure here", which is removal — not
+  // zero. Typing 0 is how you say zero.
+  if (!raw) {
+    if (await saveAvailable({}, "DELETE")) {
+      setMessage(availableMsg, "Removed — no balance set.", "ok");
+    }
+    return;
+  }
+
+  const amount = parseFloat(raw);
+  if (!isFinite(amount) || amount < 0) {
+    setMessage(availableMsg, "Enter an amount of zero or more.", "err");
+    return;
+  }
+  if (await saveAvailable({ amount }, "POST")) {
+    setMessage(
+      availableMsg,
+      "Saved. Refresh the AI Advisor to score against it.",
+      "ok"
+    );
+  }
+});
+
+availableRemoveBtn.addEventListener("click", async () => {
+  setMessage(availableMsg, "", "");
+  if (await saveAvailable({}, "DELETE")) {
+    setMessage(availableMsg, "Removed — no balance set.", "ok");
+  }
+});
 
 // Build the interval toggle buttons once, from the intervals the API reports.
 function buildIntervalToggles() {
@@ -493,9 +636,16 @@ buyForm.addEventListener("submit", async (e) => {
       return;
     }
     const s = data.stock;
+    // Say that the balance moved. It happens server-side on every buy, and a
+    // number that changes on its own with no explanation is worse than one
+    // that doesn't change at all.
+    const spent =
+      availableState && !availableState.vacant
+        ? ` −$${fmt(payload.shares * payload.avg_price)} from available to trade.`
+        : "";
     setMessage(
       buyMsg,
-      `Saved ${s.ticker}: ${fmt(s.shares)} shares @ $${fmt(s.avg_price)} avg.`,
+      `Saved ${s.ticker}: ${fmt(s.shares)} shares @ $${fmt(s.avg_price)} avg.${spent}`,
       "ok"
     );
     buyForm.reset();
@@ -2437,15 +2587,24 @@ function actionsPlan() {
 function renderActions() {
   if (!actionsData) return;
   // Before anything has been scored there is no plan to show — and "holding
-  // $10,000 in cash" would read as a decision rather than an empty panel.
+  // the whole balance in cash" would read as a decision rather than an empty
+  // panel.
   const plan = actionsData.scored ? actionsPlan() : null;
 
-  actionsBudgetEl.textContent = actionsData.budget
-    ? `${fmtUsd(actionsData.budget)} to work with`
-    : "";
-  actionsBudgetEl.title =
-    "A stand-in balance — the app doesn't know your real cash. The split " +
-    "between names is the answer; the dollars are a scale you can multiply.";
+  // Never present a stand-in as though it were the investor's money: the chip
+  // says which balance the plan was sized against, and the tooltip says what
+  // that means for how literally to read the dollars below.
+  const real = actionsData.budget_source === "available";
+  actionsBudgetEl.textContent = real
+    ? `${fmtUsd(actionsData.budget)} available to trade`
+    : `${fmtUsd(actionsData.budget)} to work with (stand-in)`;
+  actionsBudgetEl.title = real
+    ? "Sized against the balance you entered above, so these are orders in " +
+      "your own money. Buying draws it down."
+    : "A stand-in balance — you haven't said what you have available, and the " +
+      "app doesn't guess. The split between names is the answer; the dollars " +
+      "are a scale you can multiply. Set Available to trade above to size " +
+      "this against your real cash.";
 
   setActionsStatus(plan);
   renderActionsSummary(plan);
@@ -2489,18 +2648,41 @@ function renderActionsSummary(plan) {
     plan.sells.length ? `<strong class="act-count sell">${plan.sells.length}</strong> to sell` : "",
   ].filter(Boolean);
 
+  // "You have no money" and "nothing was worth buying" are different answers
+  // and deserve different sentences — collapsing them would read as the agents
+  // having found nothing, when in fact they were never asked to size anything.
   actionsSummaryEl.innerHTML = counts.length
     ? counts.join(" · ")
+    : plan.no_cash
+    ? `Nothing to buy — you have <strong>$0</strong> available to trade.`
     : `No trade today — nothing beat leaving the money at ${fmt(
         plan.cash_apr
       )}%.`;
+
+  // With no balance there is no split to draw and no idle cash to price. Say
+  // what would change instead.
+  if (plan.no_cash) {
+    actionsCashEl.innerHTML = `
+      <div class="cash-legend">
+        <span class="act-cash-out">No cash to deploy. Buys reappear here as
+          soon as <strong>Available to trade</strong> above is topped up
+          ${
+            plan.sells.length
+              ? "— or the sells below would raise " +
+                fmtUsd(plan.sell_proceeds) +
+                " of it"
+              : ""
+          }.</span>
+      </div>`;
+    return;
+  }
 
   // Holding cash is a real outcome here, not a leftover, so it gets its own
   // bar rather than being implied by the absence of rows.
   const allocated = plan.allocated || 0;
   const pct = actionsData.budget ? (allocated / actionsData.budget) * 100 : 0;
   const proceeds = plan.sell_proceeds
-    ? `<span class="act-cash-sell" title="What the sells above would raise. Separate money — the buys are sized off the $10,000, not off this.">Sells would raise ${fmtUsd(
+    ? `<span class="act-cash-sell" title="What the sells above would raise. Separate money — the buys are sized off the balance, not off this.">Sells would raise ${fmtUsd(
         plan.sell_proceeds
       )}</span>`
     : "";
@@ -2530,7 +2712,10 @@ function renderActionsList(plan) {
   if (!plan.total) {
     // A day with nothing to do is a real answer. The cash line above already
     // says where the money is instead, so this only has to say it plainly.
-    actionsListEl.innerHTML = `<p class="ai-empty">Nothing to trade today —
+    actionsListEl.innerHTML = plan.no_cash
+      ? `<p class="ai-empty">Nothing to do — there's no cash to buy with, and
+         nothing you hold is worth selling.</p>`
+      : `<p class="ai-empty">Nothing to trade today —
       the whole balance stays where it is.</p>`;
     return;
   }
@@ -2814,6 +2999,10 @@ function reloadAllPanels() {
   if (newsSummaryView) newsSummaryView.hidden = false;
   // Expanded action rows belong to the portfolio being left behind.
   openActionRows.clear();
+  // So does a half-typed balance — the money is per-portfolio, and saving it
+  // after a switch would file it under the wrong one.
+  availableEditing = false;
+  setMessage(availableMsg, "", "");
   loadSummary();
   loadStocks();
   loadWishlist();

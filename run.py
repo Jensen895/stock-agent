@@ -79,6 +79,7 @@ from backend.news_data import (
 from backend.server import run_server
 from backend.trending_data import TrendingBoard
 from backend.service import (
+    AvailableCashService,
     MarketService,
     PortfolioService,
     SalesService,
@@ -149,7 +150,13 @@ def main():
     portfolio_storage = WorkspaceStorage(manager, "portfolio.json")
     # sales log: every sell is recorded here so realized gains can be summed.
     sales = SalesService(WorkspaceStorage(manager, "sales.json"))
-    portfolio = PortfolioService(portfolio_storage, sales=sales)
+    # "Available to trade": the cash on hand to buy with. The one figure the app
+    # can't derive, so it's typed in — and left *vacant* until it is, which is a
+    # third state distinct from $0 (see the service). Three things read it:
+    # buying draws it down, the AI Actions plan is sized against it instead of
+    # the stand-in $10,000, and every agent is told what there is to spend.
+    available = AvailableCashService(WorkspaceStorage(manager, "available.json"))
+    portfolio = PortfolioService(portfolio_storage, sales=sales, available=available)
     # wishlist also reads holdings so it can reject stocks you already own.
     wishlist = WishlistService(
         WorkspaceStorage(manager, "wishlist.json"), holdings=portfolio_storage
@@ -158,8 +165,9 @@ def main():
     # and earnings dates. Swap this provider to change data sources.
     market_data = MarketDataProvider()
     market = MarketService(market_data, portfolio)
-    # dashboard summary: total worth + realized + real unrealized gains.
-    summary = SummaryService(portfolio, sales, market)
+    # dashboard summary: total worth + available to trade + realized + real
+    # unrealized gains.
+    summary = SummaryService(portfolio, sales, market, available=available)
 
     # AI advisor: five independent agents turn the portfolio into one 0-100
     # confidence score per stock for the next one to three months
@@ -290,7 +298,7 @@ def main():
         analysts=analysts, agent_weights=_agent_weights(),
         fundamentals=fundamentals, wishlist=wishlist, macro_news=macro_news,
         weights_storage=WorkspaceStorage(manager, "ai_weights.json"),
-        sales=sales,
+        sales=sales, cash=available,
     )
     # Refreshes once per trading day, at the opening bell (plus once on boot if
     # nothing is cached). The Refresh button in the UI forces one any time.
@@ -321,18 +329,22 @@ def main():
     discover.start_scheduler()
 
     # AI Actions: the last step after all the scoring — what to actually do
-    # today, in shares, against a dummy $10,000 cash balance. It calls no model
+    # today, in shares, against the cash you have available. It calls no model
     # and stores nothing; it is arithmetic over the suggestions the advisor and
     # discover panels have already produced, so it costs a page load and moves
-    # the moment either of them (or an agent weight) changes.
+    # the moment either of them (or an agent weight, or the balance) changes.
     #
-    # The balance is pretend on purpose: the app doesn't know what's in your
-    # brokerage account, so the dollar figures are a scale and the proportions
-    # are the answer. Change it by passing budget= here.
-    actions = AiActionsService(advisor, discover, market, portfolio)
+    # Sized against "Available to trade" when that has been filled in — then the
+    # share counts are orders you could actually place. Until it is, it falls
+    # back to a pretend $10,000 and labels it as one: the app doesn't know
+    # what's in your brokerage account and won't invent it, so the dollar
+    # figures are a scale and the proportions are the answer. Change the
+    # fallback by passing budget= here.
+    actions = AiActionsService(advisor, discover, market, portfolio,
+                               available=available)
 
     run_server(portfolio, wishlist, summary, market, advisor, manager, discover,
-               actions, host="127.0.0.1", port=8000)
+               actions, available, host="127.0.0.1", port=8000)
 
 
 if __name__ == "__main__":

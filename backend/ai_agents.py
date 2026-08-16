@@ -70,6 +70,13 @@ Without it the models score as though the investor were obliged to be fully
 invested, and a stock expected to go nowhere comes back as a 50 instead of the
 loss against cash that it is.
 
+The same goes for *how much* cash there is. When the investor has filled in
+**Available to trade**, every agent is told the figure (``available_cash_note``)
+— again identically, so nothing about the disjoint-evidence split changes. It
+is not evidence about any company; it is the size of the decision, and $500 and
+$500,000 make the same 60/100 mean different things. Left vacant, the line is
+omitted entirely and the prompts are what they always were.
+
 Adding a sixth agent means adding a class here with a ``role``, a ``payload``
 and an entry in ``AGENTS``. Nothing in ``ai_advisor.py`` enumerates the five.
 """
@@ -153,6 +160,7 @@ _CASH = (
     "what actually gets bought and how much."
 )
 
+
 # The shape of the answer. Identical for every agent so one JSON schema and one
 # cleaner in ``ai_advisor.py`` handle all five.
 _OUTPUT = (
@@ -204,6 +212,73 @@ _KIND_FRAME = {
 }
 
 _KINDS = ("holdings", "wishlist")
+
+
+# The last of the shared lines, and the only one that is generated rather than
+# a constant — because it carries a number the investor typed in.
+def available_cash_note(amount) -> str:
+    """What the investor actually has to spend, when they have said.
+
+    Returns "" while the **Available to trade** section is vacant, which is the
+    default and the pre-existing behaviour: with no figure entered the agents
+    score exactly as they always did, against cash-in-the-abstract.
+
+    When there *is* a figure, every agent is told it. Not as evidence — it says
+    nothing about any company, and the five slices stay disjoint because all
+    five get the same line — but as the size of the decision. The same 60/100
+    means something different against $500 than against $500,000: at the small
+    end a single share of an expensive name is the entire position and there is
+    no room to be wrong, and a marginal buy costs the chance to take the good
+    one that turns up next week. Without the number the models reason as though
+    capital were unlimited, which is the failure mode this fixes.
+
+    It deliberately does NOT ask for position sizes. The share counts are
+    arithmetic in ``actions.py``, sized against this same balance, and an agent
+    inventing its own split would fight that — so the note reinforces the
+    "do not ration" rule above rather than relaxing it, and asks only that
+    scarcity be priced into the score and named in the reasoning.
+    """
+    if amount is None:
+        return ""
+    amount = float(amount)
+    if amount <= 0:
+        return (
+            "THE INVESTOR HAS NO CASH AVAILABLE TO TRADE. They have stated a "
+            "balance of $0 — nothing can be bought today whatever you score, "
+            "and anything they do buy has to be funded by selling something "
+            "they already own.\n"
+            "Two consequences for your score:\n"
+            "  - Keep scoring honestly. A buy-scored name is still worth "
+            "flagging: it tells the investor what they would want first when "
+            "money arrives, and it is the bar a sell candidate has to be worse "
+            "than.\n"
+            "  - Be correspondingly firmer about names your evidence has gone "
+            "cold on. With no cash, the only way into a better position is out "
+            "of a worse one, so an honest low score is more useful than usual."
+        )
+    return (
+        "THE INVESTOR HAS A FINITE AMOUNT TO SPEND: "
+        f"${amount:,.2f} of cash available to trade, and that is all. This is "
+        "a real balance they entered, not a notional one, and every buy across "
+        "their whole list — holdings they might add to, watchlist names, and "
+        "stocks in the news — competes for the same pot.\n"
+        "Three consequences for your score:\n"
+        "  - Scarcity raises the bar. A marginal buy does not just have to beat "
+        f"cash at {CASH_APR_PCT:g}% APR, it has to be worth spending money that "
+        "then cannot go to the better idea that turns up next month. When your "
+        "evidence is merely mildly positive, that is a score in the 50s, not "
+        "the 70s.\n"
+        "  - Size the balance against the price. If one share costs a large "
+        f"fraction of ${amount:,.2f}, entering at all is a concentrated bet "
+        "rather than a position — say so plainly in your reasoning, and let it "
+        "temper a score you would otherwise give freely. If a share costs more "
+        "than the whole balance, say that outright.\n"
+        "  - Still do not ration or allocate. Do not divide the balance between "
+        "tickers, do not name dollar amounts or share counts, and do not lower "
+        "one ticker's score because you already scored another highly. A "
+        "separate step sizes the actual orders against this same figure; your "
+        "job is to price the scarcity into each score and explain it."
+    )
 
 
 # --- fundamentals, split between the agents that may see them -----------
@@ -310,10 +385,21 @@ class Agent:
             f"{_OUTPUT}"
         )
 
-    def prompt(self, payload: dict, kind: str, risk: str) -> str:
+    def prompt(self, payload: dict, kind: str, risk: str,
+               available_cash=None) -> str:
+        """The user turn: the stance, the balance (if any), then the evidence.
+
+        ``available_cash`` is the only thing here that is shared across all
+        five agents, and like ``_CASH`` in the system prompt it is a constraint
+        rather than evidence — see ``available_cash_note``. None (the default,
+        and what a vacant section produces) leaves the prompt exactly as it was
+        before the feature existed.
+        """
+        budget = available_cash_note(available_cash)
         return (
             f"{_STANCE[risk]}\n\n"
-            f"{self.data_note(kind)}\n\n"
+            + (f"{budget}\n\n" if budget else "")
+            + f"{self.data_note(kind)}\n\n"
             f"{json.dumps(payload, indent=2, default=str)}"
         )
 

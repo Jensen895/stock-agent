@@ -19,7 +19,15 @@ Endpoints:
   DELETE /api/wishlist      -> remove a ticker from wishlist  (write)
                                body: {"ticker"}
   GET    /api/summary       -> dashboard totals               (read only)
-                               total worth + realized + unrealized gains
+                               total worth + available to trade + realized +
+                               unrealized gains
+  POST   /api/available     -> set the cash available to trade (write)
+                               body: {"amount": number >= 0}
+  DELETE /api/available     -> remove it — the section goes vacant (write)
+                               A vacant section is the default: the app never
+                               guesses at what's in your brokerage account.
+                               Buying draws this down automatically, and the
+                               AI Actions plan is sized against it.
   GET    /api/ai            -> latest AI suggestions           (read only)
                                summary + per-stock detail, low & high risk,
                                each score broken down by the five agents
@@ -29,10 +37,12 @@ Endpoints:
                                about, what the company is, and the same
                                five-agent confidence score as everything else
   POST   /api/discover/refresh -> trigger a background regeneration of picks
-  GET    /api/actions       -> what to do now on a dummy $10,000 (read only)
+  GET    /api/actions       -> what to do now, in shares      (read only)
                                buys sized in shares, sells sized against the
                                position, and the names to wait on — one plan
-                               per risk profile. Derived from the suggestions
+                               per risk profile, sized against your available
+                               to trade balance (or a stand-in $10,000 while
+                               that is vacant). Derived from the suggestions
                                the advisor and discover panels already made, so
                                no model is called and it is always instant.
   POST   /api/ai/weights    -> set how much each AI agent counts     (write)
@@ -87,6 +97,7 @@ def make_handler(
     workspace=None,
     discover=None,
     actions=None,
+    available=None,
 ):
     """Build a request handler bound to the given service instances."""
 
@@ -157,6 +168,8 @@ def make_handler(
             elif self.path == "/api/discover/refresh":
                 started = discover.request_refresh() if discover else False
                 self._send_json(200, {"started": started})
+            elif self.path == "/api/available":
+                self._handle_available_set()
             elif self.path == "/api/portfolios":
                 self._handle_portfolio_create()
             elif self.path == "/api/portfolios/switch":
@@ -173,6 +186,8 @@ def make_handler(
                 self._handle_delete()
             elif self.path == "/api/wishlist":
                 self._handle_wishlist_remove()
+            elif self.path == "/api/available":
+                self._handle_available_clear()
             elif self.path == "/api/portfolios":
                 self._handle_portfolio_delete()
             else:
@@ -211,6 +226,29 @@ def make_handler(
         def _handle_wishlist_remove(self):
             def action(body):
                 return {"removed": wishlist.remove(ticker=body.get("ticker"))}
+            self._run(action)
+
+        # --- available to trade -----------------------------------------
+        #
+        # Both return the resulting state — {"amount", "vacant"} — rather than
+        # 204, so the UI redraws from what was actually stored instead of from
+        # what it hoped it sent. Rounding and the zero-vs-vacant distinction
+        # both happen server-side, and this is how the client learns of them.
+        # A missing service degrades to "vacant" rather than 404: the section
+        # is optional, and a UI without one should show it empty, not broken.
+
+        def _handle_available_set(self):
+            def action(body):
+                if available is None:
+                    return {"available": {"amount": None, "vacant": True}}
+                return {"available": available.set(body.get("amount"))}
+            self._run(action)
+
+        def _handle_available_clear(self):
+            def action(body):
+                if available is None:
+                    return {"available": {"amount": None, "vacant": True}}
+                return {"available": available.clear()}
             self._run(action)
 
         def _handle_ai_weights(self):
@@ -333,11 +371,13 @@ def run_server(
     workspace=None,
     discover=None,
     actions=None,
+    available=None,
     host: str = "127.0.0.1",
     port: int = 8000,
 ):
     handler = make_handler(
-        portfolio, wishlist, summary, market, advisor, workspace, discover, actions
+        portfolio, wishlist, summary, market, advisor, workspace, discover,
+        actions, available
     )
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"Stock assistant running at http://{host}:{port}")

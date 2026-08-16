@@ -12,6 +12,8 @@ Responsibilities:
     fully selling out removes the position, recording the realized gain/loss
   - delete: drop an entire position outright (for correcting mistakes)
   - wishlist: track tickers you plan to buy but don't yet own (ticker only)
+  - available to trade: the cash on hand to buy with — the one figure the app
+    cannot derive, so it is entered by hand and may be left vacant
   - sales log: every sale is recorded so realized gains can be summed over
     time windows (1d / 1w / 1m / ytd / 1y)
   - market: enrich holdings/wishlist with live prices and earnings dates, and
@@ -59,11 +61,15 @@ class ValidationError(ValueError):
 
 
 class PortfolioService:
-    def __init__(self, storage: StorageBackend, sales: "SalesService" = None):
+    def __init__(self, storage: StorageBackend, sales: "SalesService" = None,
+                 available: "AvailableCashService" = None):
         self.storage = storage
         # Optional sales log. When present, every sale records its realized
         # gain/loss so the dashboard can sum realized gains over time.
         self.sales = sales
+        # Optional "available to trade" balance. When present, buying draws the
+        # cost of the buy out of it — money spent is money no longer available.
+        self.available = available
 
     def add_stock(self, ticker: str, shares, price) -> dict:
         """Add a holding. If the ticker exists, accumulate shares and
@@ -95,6 +101,15 @@ class PortfolioService:
 
         portfolio[ticker] = position
         self.storage.save(portfolio)
+
+        # Buying spends money, so the "available to trade" balance follows it
+        # down by what this buy actually cost (the shares bought at the price
+        # paid — not the recomputed average, which is history). Only the buy
+        # side moves it: the proceeds of a sale land in a brokerage account the
+        # app cannot see, and crediting them automatically would turn a
+        # note-to-self into a ledger that claims to track the real account.
+        if self.available is not None:
+            self.available.spend(shares * price)
         return position
 
     def sell_stock(self, ticker: str, shares, price) -> dict:
@@ -248,6 +263,130 @@ class WishlistService:
         """Return all wishlist entries, sorted by ticker."""
         wishlist = self.storage.load()
         return [wishlist[t] for t in sorted(wishlist)]
+
+
+class AvailableCashService:
+    """How much money is on hand to buy stocks with — or nothing entered at all.
+
+    This is the one figure in the app that cannot be derived. Holdings, gains
+    and realized returns all fall out of what has been recorded; the cash
+    sitting in a brokerage account waiting to be spent is known only because
+    the investor said so. So it has three states rather than two — an amount,
+    zero, and **vacant** (never entered, or removed) — and vacant is the
+    default. Nothing here guesses.
+
+    The distinction between zero and vacant is the point of the class, and it
+    is load-bearing downstream:
+
+      vacant  "I haven't told you." The AI Actions plan falls back to its
+              stand-in balance and says so, and the agents are told nothing
+              about a budget — exactly as before this existed.
+      0       "I have nothing to invest right now." A real instruction, and a
+              different answer from the plan: no buy can be sized.
+      n > 0   Real money. The plan is sized against it instead of the stand-in,
+              and every agent is told what it has to work with.
+
+    Stored as ``{"amount": n}`` in its own per-portfolio file — a trading
+    balance belongs to a portfolio the same way its holdings do. Removing the
+    figure deletes the key rather than writing a 0, so the two states can never
+    be confused on disk.
+    """
+
+    KEY = "amount"
+
+    def __init__(self, storage: StorageBackend):
+        self.storage = storage
+
+    # --- reads ----------------------------------------------------------
+
+    def get(self):
+        """The available balance, or None when the section is vacant.
+
+        Never raises and never propagates a bad file: this figure is read on
+        every dashboard load and by every AI refresh, and an unreadable one
+        should cost the feature, not the page. A missing, malformed or negative
+        stored value all read as vacant — "we don't know" is the honest answer
+        for each of them.
+        """
+        try:
+            raw = (self.storage.load() or {}).get(self.KEY)
+        except Exception:
+            return None
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            amount = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return round(amount, 2) if amount >= 0 else None
+
+    def state(self) -> dict:
+        """The shape every caller reads: the amount, and whether it is set."""
+        amount = self.get()
+        return {"amount": amount, "vacant": amount is None}
+
+    # --- writes ---------------------------------------------------------
+
+    def set(self, amount) -> dict:
+        """Record how much is available to trade. Returns the new state.
+
+        Zero is allowed — see the class note. Negative is not: an overdrawn
+        brokerage account is not a thing this app models, and silently flooring
+        it would hide a typo.
+        """
+        try:
+            value = float(amount)
+        except (TypeError, ValueError):
+            raise ValidationError("Available to trade must be a number.")
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValidationError("Available to trade must be a number.")
+        if value < 0:
+            raise ValidationError("Available to trade can't be negative.")
+        return self._write(value)
+
+    def clear(self) -> dict:
+        """Remove the figure entirely — back to vacant. Returns the new state.
+
+        Deletes the key rather than storing 0, so "I removed it" and "I have
+        nothing" stay distinguishable on the next read.
+        """
+        data = self._load()
+        data.pop(self.KEY, None)
+        self.storage.save(data)
+        return self.state()
+
+    def spend(self, amount) -> dict:
+        """Draw the cost of a buy out of the balance. A no-op while vacant.
+
+        Floors at zero rather than going negative. Running the balance out
+        means "there is nothing left to deploy", which the plan can act on; a
+        negative number would assert a debt the app has no way to know about.
+        Buying more than you said you had isn't an error either — this figure
+        is a note to self, not a ledger with the standing to veto a trade — so
+        it is recorded as an empty balance rather than a rejection.
+        """
+        current = self.get()
+        if current is None:
+            return self.state()  # vacant stays vacant; a buy doesn't create it
+        try:
+            cost = float(amount)
+        except (TypeError, ValueError):
+            return self.state()
+        return self._write(max(0.0, current - cost))
+
+    # --- internals ------------------------------------------------------
+
+    def _load(self) -> dict:
+        try:
+            return self.storage.load() or {}
+        except Exception:
+            return {}
+
+    def _write(self, value: float) -> dict:
+        data = self._load()
+        data[self.KEY] = round(float(value), 2)
+        self.storage.save(data)
+        return self.state()
 
 
 class SalesService:
@@ -586,8 +725,13 @@ class SummaryService:
     """Composes the dashboard summary from the other services.
 
     Pulls total holdings worth (from the portfolio), realized gains by interval
-    (from the sales log), and real unrealized gains + graph series (today/total)
-    from the market service.
+    (from the sales log), real unrealized gains + graph series (today/total)
+    from the market service, and the available-to-trade balance.
+
+    The balance rides along here rather than getting its own read because it is
+    shown in the same block as total worth, and the two want to change together:
+    a buy moves both, and one request keeps them from disagreeing on screen for
+    a frame.
     """
 
     def __init__(
@@ -595,15 +739,24 @@ class SummaryService:
         portfolio: PortfolioService,
         sales: SalesService,
         market: "MarketService" = None,
+        available: AvailableCashService = None,
     ):
         self.portfolio = portfolio
         self.sales = sales
         self.market = market
+        self.available = available
 
     def summary(self) -> dict:
         unrealized = self.market.unrealized_summary() if self.market else {}
         return {
             "total_worth": self.portfolio.total_cost_basis(),
+            # {"amount": n|None, "vacant": bool}. Vacant when never entered or
+            # removed — the UI shows the section empty rather than a zero.
+            "available": (
+                self.available.state()
+                if self.available
+                else {"amount": None, "vacant": True}
+            ),
             "realized": self.sales.realized_gains_by_interval(),
             "sales": self.sales.list_sales(),  # sell history, newest first
             "unrealized": unrealized,

@@ -1,4 +1,4 @@
-"""AI Actions — what to do right now, in shares, on a dummy $10,000.
+"""AI Actions — what to do right now, in shares, on the money you have.
 
 Every other AI panel in this app answers "how strongly do the agents feel about
 this stock?" and stops there. A 71/100 on NVDA is a view, not an instruction:
@@ -6,11 +6,25 @@ it doesn't say whether to act today, and it certainly doesn't say *how many
 shares*. This module is the last step — it turns the scores already on screen
 into a short list of concrete orders sized against a cash balance.
 
-The cash balance is a stand-in. The app has no idea what is in your brokerage
-account and deliberately doesn't ask, so ``_BUDGET`` is a flat $10,000 of
-pretend money. Read every dollar figure here as "if you had $10,000 to put to
-work today, this is the split" — the *proportions* are the answer, the absolute
-numbers are a scale you can multiply.
+Where the balance comes from
+----------------------------
+Two sources, and the panel always says which one it used:
+
+  the real figure  What you entered in **Available to trade** on the dashboard
+                   (``AvailableCashService``). Then the dollars are your
+                   dollars: the share counts below are orders you could place,
+                   and a $0 balance correctly produces no buys at all.
+  the stand-in     Nothing entered — the section is vacant. The app has no idea
+                   what is in your brokerage account and won't invent one, so
+                   it falls back to ``_BUDGET``, a flat $10,000 of pretend
+                   money, and labels it. Read those dollar figures as "if you
+                   had $10,000 to put to work today, this is the split" — the
+                   *proportions* are the answer, the absolute numbers are a
+                   scale you can multiply.
+
+The balance is read fresh on every request, so entering it, editing it, or
+buying something (which draws it down) resizes the whole plan immediately —
+without re-running a single agent.
 
 No model is called
 ------------------
@@ -47,7 +61,7 @@ not acting is the money: cash is a position, and it is priced.
 
 Sizing, and the right to hold cash
 ----------------------------------
-The $10,000 is *available*, not a target, and cash is not the leftover — it is
+The balance is *available*, not a target, and cash is not the leftover — it is
 a position that pays. Uninvested money earns ``CASH_APR_PCT`` (4.25% APR, the
 same figure every agent is told about in ``ai_agents.py``), risk-free and
 liquid, so money only leaves it when a name has earned it.
@@ -55,7 +69,7 @@ liquid, so money only leaves it when a name has earned it.
 Each buy can claim at most an equal slice of the balance, and takes the part of
 that slice its conviction justifies::
 
-    slice    = budget / _MAX_BUYS                          ($2,000 of $10,000)
+    slice    = budget / _MAX_BUYS                     (a fifth of the balance)
     claim    = (confidence - 55) / (_FULL_CONVICTION_AT - 55)   capped at 1.0
     deployed = slice x claim
 
@@ -80,14 +94,20 @@ to the whole position once the score reaches the low teens.
 A name with no live quote can't be turned into a share count, so it is listed
 unsized and its dollars stay in cash rather than being guessed at.
 
-Not financial advice. These are model-generated numbers on imaginary money.
+Not financial advice. These are model-generated numbers.
 """
 
 from backend.ai_agents import CASH_APR_PCT
 
-# The pretend cash balance every plan is sized against. See the module note:
-# the proportions are the answer, the dollars are a scale.
+# The fallback balance, used only while "Available to trade" is vacant. See the
+# module note: with no real figure the proportions are the answer and the
+# dollars are a scale, so this wants to be a round, obviously-notional number.
 _BUDGET = 10000.0
+
+# How the balance in a payload was arrived at, so the UI can caption it
+# honestly instead of showing a pretend figure as though it were yours.
+_SOURCE_ENTERED = "available"    # you told us
+_SOURCE_PLACEHOLDER = "placeholder"  # the section is vacant; this is the stand-in
 
 # The confidence floor for a buy — the bottom of the "Lean buy" band, the same
 # edge ``ai_advisor._WISHLIST_MIN_CONFIDENCE`` uses. Keeping the two the same
@@ -166,21 +186,27 @@ class AiActionsService:
 
     Composes the advisor (holdings + wishlist calls, and the agent weights they
     were blended under), the discover panel (stocks you don't own yet), the
-    market provider (live prices, to convert dollars into shares) and the
-    portfolio (what you actually hold, to size a sell).
+    market provider (live prices, to convert dollars into shares), the
+    portfolio (what you actually hold, to size a sell) and the available-cash
+    service (how much there is to spend, when you've said).
 
     Holds no scoring logic and writes nothing: every number here is derived
     from suggestions those panels already produced, so a plan is only ever as
     fresh as they are and is regenerated from scratch on each request.
     """
 
-    def __init__(self, advisor, discover, market, portfolio,
+    def __init__(self, advisor, discover, market, portfolio, available=None,
                  budget: float = _BUDGET, max_buys: int = _MAX_BUYS,
                  max_sells: int = _MAX_SELLS):
         self.advisor = advisor
         self.discover = discover
         self.market = market
         self.portfolio = portfolio
+        # The entered balance, or None/absent. Read per request rather than
+        # cached: editing the figure or buying something has to resize the plan
+        # on the next page load, and nothing else invalidates it.
+        self.available = available
+        # The stand-in used only while that section is vacant.
         self.budget = float(budget)
         self.max_buys = max_buys
         self.max_sells = max_sells
@@ -192,6 +218,8 @@ class AiActionsService:
         advisor = self._safe(lambda: self.advisor.get() if self.advisor else {}, {})
         discover = self._safe(lambda: self.discover.get() if self.discover else {}, {})
 
+        budget, source = self._resolve_budget()
+
         candidates = {
             risk: self._candidates(advisor, discover, risk) for risk in _RISKS
         }
@@ -201,7 +229,7 @@ class AiActionsService:
         owned = self._owned()
 
         plans = {
-            risk: self._plan(risk, candidates[risk], prices, owned)
+            risk: self._plan(risk, candidates[risk], prices, owned, budget)
             for risk in _RISKS
         }
         # "Something has been scored", not "something is worth doing". Now that
@@ -215,7 +243,11 @@ class AiActionsService:
             # Nothing has been generated yet vs. generated and quiet are very
             # different states, and the panel says which.
             "scored": scored,
-            "budget": round(self.budget, 2),
+            "budget": round(budget, 2),
+            # "available" = the figure you entered, "placeholder" = the stand-in
+            # standing in for one you haven't. The UI captions the number from
+            # this rather than presenting pretend money as though it were real.
+            "budget_source": source,
             "buy_floor": _BUY_FLOOR,
             "full_conviction_at": _FULL_CONVICTION_AT,
             "max_buys": self.max_buys,
@@ -276,10 +308,32 @@ class AiActionsService:
                 }
         return list(best.values())
 
+    # --- the balance ----------------------------------------------------
+
+    def _resolve_budget(self):
+        """(amount, source) — what this plan is sized against, and whose it is.
+
+        The entered figure wins whenever there is one, *including zero*: "I
+        have nothing to invest" is an answer, and quietly substituting $10,000
+        of pretend money for it would produce a page of buys against money the
+        investor just said they don't have. Only a vacant section falls back.
+        """
+        amount = self._safe(
+            lambda: self.available.get() if self.available else None, None
+        )
+        if amount is None:
+            return self.budget, _SOURCE_PLACEHOLDER
+        return max(0.0, float(amount)), _SOURCE_ENTERED
+
     # --- the plan -------------------------------------------------------
 
-    def _plan(self, risk: str, candidates: list, prices: dict, owned: dict) -> dict:
+    def _plan(self, risk: str, candidates: list, prices: dict, owned: dict,
+              budget: float) -> dict:
         """One risk profile's buys and sells, with the cash arithmetic."""
+        # With nothing to spend there is no buy to plan — a row reading
+        # "buy 0 shares for $0" is not an instruction, it is the arithmetic
+        # leaking. The names are still scored in the AI Advisor column; what
+        # this panel has to say about them today is that they aren't affordable.
         buys = sorted(
             (
                 c for c in candidates
@@ -288,7 +342,7 @@ class AiActionsService:
             ),
             key=lambda c: c["confidence"] or 0,
             reverse=True,
-        )[: self.max_buys]
+        )[: self.max_buys] if budget > 0 else []
 
         sells = sorted(
             (
@@ -303,19 +357,22 @@ class AiActionsService:
             key=lambda c: c["confidence"] if c["confidence"] is not None else 50,
         )[: self.max_sells]
 
-        buy_rows, allocated = self._size_buys(buys, prices, owned)
+        buy_rows, allocated = self._size_buys(buys, prices, owned, budget)
         sell_rows, proceeds = self._size_sells(sells, prices, owned)
 
-        cash = round(self.budget - allocated, 2)
+        cash = round(budget - allocated, 2)
         return {
             "risk": risk,
             "buys": buy_rows,
             "sells": sell_rows,
             "total": len(buy_rows) + len(sell_rows),
+            # A balance of exactly nothing. Distinct from "nothing scored well
+            # enough today", and the two want different sentences on screen.
+            "no_cash": budget <= 0,
             # What the plan actually commits, and what it deliberately doesn't.
             "allocated": round(allocated, 2),
             "cash_remaining": cash,
-            "cash_pct": round(cash / self.budget * 100, 1) if self.budget else None,
+            "cash_pct": round(cash / budget * 100, 1) if budget else None,
             # Cash isn't idle, so the plan says what it earns. This is the
             # figure a buy has to be worth more than.
             "cash_apr": CASH_APR_PCT,
@@ -328,11 +385,11 @@ class AiActionsService:
             "sell_proceeds": round(proceeds, 2),
         }
 
-    def _slice(self) -> float:
+    def _slice(self, budget: float) -> float:
         """The most any single name may take out of cash."""
-        return self.budget / self.max_buys if self.max_buys else 0.0
+        return budget / self.max_buys if self.max_buys else 0.0
 
-    def _size_buys(self, buys: list, prices: dict, owned: dict):
+    def _size_buys(self, buys: list, prices: dict, owned: dict, budget: float):
         """Turn the buy candidates into share counts. Returns (rows, allocated).
 
         Each name takes the part of an equal slice that its conviction has
@@ -349,7 +406,7 @@ class AiActionsService:
                 row.update(shares=None, cost=None, claim_pct=None, unpriced=True)
                 continue
             claim = _claim(row["confidence"])
-            shares = self._slice() * claim / row["price"]
+            shares = self._slice(budget) * claim / row["price"]
             cost = round(shares * row["price"], 2)
             row.update(
                 shares=round(shares, 4),

@@ -1438,7 +1438,8 @@ class AIAdvisorService:
     def __init__(self, clients, news, market, portfolio, summary,
                  storage=None, analysts=None,
                  agent_weights=None, fundamentals=None, wishlist=None,
-                 macro_news=None, weights_storage=None, sales=None):
+                 macro_news=None, weights_storage=None, sales=None,
+                 cash=None):
         # Accept a single client or a list, so existing callers keep working.
         if not isinstance(clients, (list, tuple)):
             clients = [clients]
@@ -1464,6 +1465,13 @@ class AIAdvisorService:
         # earlier exits in a name. Optional; falls back to the summary
         # service's log, which is the same object in the default wiring.
         self.sales = sales if sales is not None else getattr(summary, "sales", None)
+        # "Available to trade" — how much there is to spend, when the investor
+        # has said. Optional, and vacant by default: with no figure the agents
+        # are told nothing about a budget and score exactly as they did before.
+        # Unlike everything else the advisor holds, this is a *constraint* the
+        # agents share rather than evidence one of them owns — see
+        # ``ai_agents.available_cash_note``.
+        self.cash = cash
 
         # Per-portfolio weights live on disk next to the suggestions; the
         # constructor argument (from AI_AGENT_WEIGHTS) is the default a
@@ -1536,6 +1544,21 @@ class AIAdvisorService:
     def fundamentals_available(self) -> bool:
         """True when the company and statistics agents have figures to read."""
         return self.fundamentals is not None and self.fundamentals.available()
+
+    def available_cash(self):
+        """The entered "available to trade" balance, or None when vacant.
+
+        Exposed as a method so other panels that assemble their own context —
+        the discover board scores stocks through ``score_context`` — can tell
+        the agents the same thing about the same money, rather than the
+        constraint applying to two of the three columns.
+        """
+        if self.cash is None:
+            return None
+        try:
+            return self.cash.get()
+        except Exception:
+            return None
 
     def macro_available(self) -> bool:
         """True when the macro agent has a market-wide news tape to read."""
@@ -1866,7 +1889,11 @@ class AIAdvisorService:
             return None  # this agent has no evidence on this side — stay quiet
 
         system = agent.system(kind)
-        prompt = agent.prompt(payload, kind, risk)
+        # The balance rides on the context, not on the payload: it is the same
+        # line for all five agents and belongs to none of their evidence
+        # slices. Absent (a vacant section) leaves the prompt untouched.
+        prompt = agent.prompt(payload, kind, risk,
+                              available_cash=context.get("available_cash"))
 
         start = AGENT_KEYS.index(agent.key) % len(clients)
         rotation = [clients[(start + i) % len(clients)] for i in range(len(clients))]
@@ -2344,6 +2371,10 @@ class AIAdvisorService:
         return {
             "as_of": datetime.now(timezone.utc).isoformat(),
             "total_worth": summary.get("total_worth"),
+            # Not evidence, and not sliced up by ``ai_agents.py`` like the rest
+            # of this dict: the same constraint line goes to all five agents.
+            # None while the section is vacant, which omits it entirely.
+            "available_cash": self.available_cash(),
             "realized_gains": summary.get("realized"),
             "unrealized_gains_history": unrealized,
             # Market-wide, deliberately company-free: the macro agent's slice.
