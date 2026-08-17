@@ -1058,3 +1058,40 @@ restores all three.
 You can't delete your only portfolio. Deleting the active one moves you to
 another; the deleted portfolio's data is archived under
 `data/portfolios/_archive/`, not erased.
+
+## Back-test (`python3 backtest.py`)
+
+A second, separate command that is **not part of the app** — no server, no port,
+no panel. It answers the question the app cannot ask about itself: over time,
+does any of the five agents' scores actually relate to what the stock then did?
+
+```bash
+python3 backtest.py            # record today, price what has matured, review
+python3 backtest.py status     # how much data there is, and how much is needed
+python3 backtest.py show       # print the last report
+python3 backtest.py --no-ai    # the tables, with no model call
+```
+
+`ai_suggestions.json` holds only the *latest* prediction, so every refresh also
+appends the raw per-agent scores to `data/backtest/<portfolio>/history.json`.
+That ledger is the only place yesterday's scores survive, and it stores all five
+raw numbers rather than the blended average — a weighted average can be
+recomputed at any weights, an agent's own score cannot be recovered from one.
+
+Each run measures every prediction against the closes that followed it at 1, 5,
+10, 21 and 63 trading days, then writes a dated markdown report to
+`data/backtest/<portfolio>/reports/`. The measurements are computed in Python;
+a Claude CLI call interprets them and is explicitly licensed to conclude that
+none of the five agents predicts anything, that the optimised weights are fitted
+noise, or that the missing signal is not one of these five.
+
+Correlations are computed **within each day, across tickers**, so the market's
+own move is removed, and every p-value is taken against the number of
+*non-overlapping* return windows rather than the number of days — consecutive
+21-day predictions share twenty of their twenty-one days, and treating them as
+independent is how a back-test convinces you of something that isn't there.
+Expect "not enough data yet" for a long while; that is the honest answer, and
+`status` tells you how many more days each horizon needs.
+
+See `backend/backtest/` for the details, and `python3 backtest.py --help` for
+the rest of the flags.

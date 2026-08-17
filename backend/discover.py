@@ -103,7 +103,8 @@ class DiscoverService:
     """
 
     def __init__(self, board, advisor, market, news, wishlist, portfolio,
-                 fundamentals=None, analysts=None, storage=None, picks=_PICKS):
+                 fundamentals=None, analysts=None, storage=None, picks=_PICKS,
+                 recorder=None):
         self.board = board
         self.advisor = advisor
         self.market = market
@@ -114,6 +115,9 @@ class DiscoverService:
         self.analysts = analysts
         self.storage = storage
         self.picks = picks
+        # Optional back-test ledger — see ``backend/backtest``. Not part of the
+        # app; nothing here reads it back.
+        self.recorder = recorder
 
         self._lock = threading.Lock()
         self._refreshing = False
@@ -473,6 +477,16 @@ class DiscoverService:
             self.storage.save({"latest": latest})
         except Exception as e:
             print(f"Discover: could not persist picks: {e}")
+        # Copy into the back-test ledger, when one is wired in. Same reasoning
+        # as the advisor's: this file keeps only the newest set of picks, so
+        # without the copy there is no history to measure. Optional, outside
+        # the app, and never allowed to break a refresh.
+        if self.recorder is None:
+            return
+        try:
+            self.recorder.record(latest, "discover")
+        except Exception as e:
+            print(f"Discover: could not archive to the back-test ledger: {e}")
 
     def _generated_at_epoch(self):
         if not self._latest or not self._latest.get("generated_at"):

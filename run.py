@@ -86,10 +86,12 @@ from backend.service import (
     SummaryService,
     WishlistService,
 )
+from backend.backtest.history import WorkspaceRecorder
 from backend.workspace import WorkspaceManager, WorkspaceStorage
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 PORTFOLIOS_DIR = os.path.join(DATA_DIR, "portfolios")
+BACKTEST_DIR = os.path.join(DATA_DIR, "backtest")
 
 
 def _agent_weights():
@@ -292,13 +294,23 @@ def main():
     fundamentals = YahooFundamentalsProvider(market_data)
     print(f"Fundamentals: {fundamentals.describe()}")
 
+    # The back-test ledger. Not a feature — nothing below reads it back, no
+    # endpoint serves it and no panel renders it. It exists because
+    # ai_suggestions.json holds only the *latest* prediction: tomorrow's bell
+    # overwrites today's, so without a copy taken at the moment of the write
+    # there is no history to measure the agents against. Every refresh appends
+    # one day of raw per-agent scores to data/backtest/<portfolio>/history.json,
+    # and `python3 backtest.py` reads that file to produce the report. A failure
+    # here costs a day of back-test data and never a refresh.
+    recorder = WorkspaceRecorder(manager, BACKTEST_DIR)
+
     advisor = AIAdvisorService(
         llms, news, market, portfolio, summary,
         storage=WorkspaceStorage(manager, "ai_suggestions.json"),
         analysts=analysts, agent_weights=_agent_weights(),
         fundamentals=fundamentals, wishlist=wishlist, macro_news=macro_news,
         weights_storage=WorkspaceStorage(manager, "ai_weights.json"),
-        sales=sales, cash=available,
+        sales=sales, cash=available, recorder=recorder,
     )
     # Refreshes once per trading day, at the opening bell (plus once on boot if
     # nothing is cached). The Refresh button in the UI forces one any time.
@@ -325,6 +337,7 @@ def main():
         board, advisor, market, news, wishlist, portfolio,
         fundamentals=fundamentals, analysts=analysts,
         storage=WorkspaceStorage(manager, "discover.json"),
+        recorder=recorder,
     )
     discover.start_scheduler()
 

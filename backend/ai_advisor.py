@@ -1439,7 +1439,7 @@ class AIAdvisorService:
                  storage=None, analysts=None,
                  agent_weights=None, fundamentals=None, wishlist=None,
                  macro_news=None, weights_storage=None, sales=None,
-                 cash=None):
+                 cash=None, recorder=None):
         # Accept a single client or a list, so existing callers keep working.
         if not isinstance(clients, (list, tuple)):
             clients = [clients]
@@ -1472,6 +1472,11 @@ class AIAdvisorService:
         # agents share rather than evidence one of them owns — see
         # ``ai_agents.available_cash_note``.
         self.cash = cash
+        # Optional back-test ledger (``backend/backtest``). Not a feature of
+        # the app — nothing reads it back and no panel renders it. It exists so
+        # that ``backtest.py`` has yesterday's scores to measure, which this
+        # file's own storage cannot provide because it keeps only the latest.
+        self.recorder = recorder
 
         # Per-portfolio weights live on disk next to the suggestions; the
         # constructor argument (from AI_AGENT_WEIGHTS) is the default a
@@ -2521,6 +2526,28 @@ class AIAdvisorService:
             self.storage.save({"latest": latest})
         except Exception as e:
             print(f"AI advisor: could not persist suggestions: {e}")
+        self._archive(latest)
+
+    def _archive(self, latest: dict):
+        """Copy this refresh into the back-test ledger, if one is wired in.
+
+        ``ai_suggestions.json`` holds only the newest prediction — tomorrow's
+        bell overwrites today's. The ledger is append-only, and it is the only
+        place yesterday's scores survive, so the copy has to happen at the
+        moment of the write rather than whenever someone next runs the
+        back-test command.
+
+        The recorder is optional and entirely outside the app: nothing here
+        reads it back, no endpoint serves it, and a failure is swallowed after
+        one line of output. Losing a day of back-test data is a nuisance;
+        breaking a refresh over it would not be.
+        """
+        if self.recorder is None:
+            return
+        try:
+            self.recorder.record(latest, "advisor")
+        except Exception as e:
+            print(f"AI advisor: could not archive to the back-test ledger: {e}")
 
     def _persist_weights(self):
         """Save the agent weights for the active portfolio.

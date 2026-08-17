@@ -17,3 +17,8 @@ data/portfolios/
 backend/ai_local_claude.py
 data/claude_responses/
 LOCAL_CLAUDE.md
+
+# The back-test's own data: the prediction ledger and the daily reports. The
+# code (backtest.py, backend/backtest/) is tracked; this is one portfolio's
+# private history of what its agents scored and what happened next.
+data/backtest/
