@@ -2101,15 +2101,22 @@ setInterval(() => {
 
 // --- In the News (read only) ------------------------------------------
 //
-// The one panel that starts from outside your list: three stocks the market is
-// talking about that you neither hold nor watch. Each answers three questions
-// in this order — why is it here (the chatter that surfaced it), what is it
-// (the company), and what do the agents make of it (the score).
+// The one panel that starts from outside your list: five stocks the market is
+// talking about that you neither hold nor watch.
 //
+// A summary card answers two questions and stops: what is it (the company),
+// and what do the agents make of it (the score, and the one-line verdict).
 // That order matters. The backend scores these with the *same* five agents as
 // the AI Advisor, so the numbers in the two columns are directly comparable —
 // but a 64/100 on a ticker you've never heard of means nothing until you know
-// what the company sells, so the score comes last rather than first.
+// what the company sells, so the score comes second rather than first.
+//
+// The chatter that surfaced the pick — which rooms are talking and the actual
+// headlines — lives behind "Why? →" with the agents' full reasoning. It is the
+// evidence for why the stock is on the board at all, which is worth reading
+// once you're interested and pure noise five times over while you're skimming.
+// At five picks a card that carried four headlines each pushed the scores off
+// the screen, which inverted what the column is for.
 
 const DISCOVER_API = "/api/discover";
 
@@ -2159,6 +2166,14 @@ function suggestionFor(ticker) {
   const profile = discoverProfile();
   const list = (profile && profile.suggestions) || [];
   return list.find((s) => s.ticker === ticker) || null;
+}
+
+// The pick itself — the trending evidence and the company background. Separate
+// from the suggestion because the two are keyed the same but come from
+// different halves of the payload: picks are per-refresh, suggestions per-risk.
+function pickFor(ticker) {
+  const picks = (discoverData && discoverData.picks) || [];
+  return picks.find((p) => p.ticker === ticker) || null;
 }
 
 function renderDiscover() {
@@ -2231,11 +2246,11 @@ function renderNewsPicks() {
   newsListEl.innerHTML = picks.map((p) => newsPick(p, agents)).join("");
 }
 
-// One pick: the chatter that found it, the company behind it, the agents' call.
+// One pick, summarised: the company behind it and the agents' call. The
+// chatter that found it is a click away — see ``chatterBlock``.
 function newsPick(pick, agents) {
   const ticker = escapeHtml(pick.ticker);
   const suggestion = suggestionFor(pick.ticker);
-  const trending = pick.trending || {};
 
   return `<article class="news-pick" data-ticker="${ticker}">
     <div class="news-pick-head">
@@ -2250,10 +2265,6 @@ function newsPick(pick, agents) {
           : ""
       }
     </div>
-
-    <span class="news-label">Why it's being talked about</span>
-    ${laneChips(trending)}
-    ${headlineList(trending.headlines)}
 
     <span class="news-label">About the company</span>
     ${backgroundBlock(pick, ticker)}
@@ -2293,8 +2304,11 @@ function laneChips(trending) {
   return chips ? `<div class="news-lane-chips">${chips}</div>` : "";
 }
 
-function headlineList(headlines) {
-  const items = (headlines || []).slice(0, 4);
+// The headlines behind a pick. Only rendered in the details view now, so the
+// cap is generous — someone who opened "Why?" wants the evidence, not a taste
+// of it — but still a cap, because a heavily-covered name can carry dozens.
+function headlineList(headlines, limit = 12) {
+  const items = (headlines || []).slice(0, limit);
   if (!items.length) return "";
   return `<ul class="news-heads">${items
     .map((h) => {
@@ -2362,9 +2376,11 @@ function backgroundBlock(pick, ticker) {
 // onto the same five-argument breakdown.
 function suggestionBlock(pick, suggestion, agents, ticker) {
   if (!suggestion) {
+    // Unscored, but the headlines that surfaced it still exist — so the
+    // details route stays open. It is the only way to reach them now.
     return `<span class="news-label">What the agents make of it</span>
       <p class="news-about">Not scored yet.</p>
-      ${wishlistAction(ticker)}`;
+      ${wishlistAction(ticker, true)}`;
   }
   const band = bandLabel(suggestion);
   return `<span class="news-label">What the agents make of it</span>
@@ -2387,7 +2403,8 @@ function wishlistAction(ticker, withDetails = false) {
     ${
       withDetails
         ? `<button type="button" data-news-details="${ticker}"
-             title="The five agents' full reasoning for ${ticker}">Why? →</button>`
+             title="The five agents' full reasoning for ${ticker}, and the
+ headlines that put it on the board">Why? →</button>`
         : ""
     }
     <button type="button" data-news-wishlist="${ticker}"
@@ -2396,16 +2413,36 @@ function wishlistAction(ticker, withDetails = false) {
   </div>`;
 }
 
+// Why this ticker is on the board at all: which rooms are talking, how loudly,
+// and the headlines themselves. Lives in the details view rather than the
+// summary card — it is the *provenance* of the pick, which matters once you're
+// interested in it and crowds out everything else while you're still deciding.
+function chatterBlock(pick) {
+  const trending = (pick && pick.trending) || {};
+  const chips = laneChips(trending);
+  const heads = headlineList(trending.headlines);
+  if (!chips && !heads) return "";
+  return `<div class="news-chatter">
+    <span class="news-label">Why it's being talked about</span>
+    ${chips}
+    ${heads || `<p class="news-about">No headlines captured.</p>`}
+  </div>`;
+}
+
 // Details: the same card the AI Advisor renders, so a discovered stock's
-// argument is presented exactly like a holding's.
+// argument is presented exactly like a holding's — then the chatter that
+// surfaced it, which no other panel has to show because no other panel's
+// stocks arrived unrequested.
 function renderNewsDetails() {
   if (!newsDetailsList) return;
   const suggestion = newsDetailTicker ? suggestionFor(newsDetailTicker) : null;
-  if (!suggestion) {
+  const chatter = chatterBlock(pickFor(newsDetailTicker));
+  if (!suggestion && !chatter) {
     newsDetailsList.innerHTML = `<p class="ai-empty">No details.</p>`;
     return;
   }
-  newsDetailsList.innerHTML = detailCard(suggestion, "wishlist");
+  newsDetailsList.innerHTML =
+    (suggestion ? detailCard(suggestion, "wishlist") : "") + chatter;
 }
 
 function enterNewsDetails(ticker) {
@@ -2803,8 +2840,12 @@ function actionContext(item, kind) {
   if (kind === "buys" && item.claim_pct != null) {
     // Named as what it is: how much of the money it could have taken out of a
     // 4.25% cash position this name's conviction actually justified.
+    //
+    // The slice comes off the row rather than being divided out here: it is
+    // the balance split by however many buys *this* plan has, which the client
+    // can't recompute — the two risk profiles routinely differ on that count.
     bits.push([
-      `Claimed of its ${fmtUsd(actionsData.budget / actionsData.max_buys)} slice`,
+      `Claimed of its ${fmtUsd(item.slice_size)} slice`,
       `${fmtShares(item.claim_pct)}%`,
     ]);
   }

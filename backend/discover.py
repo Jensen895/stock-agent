@@ -1,4 +1,4 @@
-"""Discover — three stocks the market is talking about that you don't own.
+"""Discover — five stocks the market is talking about that you don't own.
 
 The rest of the app answers questions about a list you wrote: what are my
 holdings worth, should I add to them, is this watchlist name a buy yet. This
@@ -12,11 +12,12 @@ The pipeline, and why it is in this order:
   2. Everything already in your holdings or on your wishlist is dropped. Those
      have panels of their own; a discover column that keeps recommending the
      stock you own most of has told you nothing.
-  3. The top three survivors are enriched exactly like a wishlist name would
+  3. The top five survivors are enriched exactly like a wishlist name would
      be: live quote, company fundamentals, sell-side research, recent company
      news, and a year of price history.
-  4. Those three go to the same five agents that score everything else, through
-     ``AIAdvisorService.score_context``, at both risk settings.
+  4. Those five go to the same five agents that score everything else, through
+     ``AIAdvisorService.score_context``, at both risk settings — all in one
+     context per agent, so the model cost does not move with ``_PICKS``.
 
 Step 4 is the point. It would have been much less work to ask one model "what's
 hot and should I buy it", and the answer would have been unfalsifiable — a
@@ -56,9 +57,16 @@ from datetime import datetime, timezone
 
 from backend.ai_advisor import _history_stats, last_market_open, next_market_open
 
-# How many stocks the panel shows. Three is the ask, and it is also about as
-# many unfamiliar companies as anyone will actually read about in a column.
-_PICKS = 3
+# How many stocks the panel shows. Five is the ask. It is also roughly the
+# ceiling for a column of unfamiliar companies — which is why the summary cards
+# were cut back to the company and the score, with the headlines moved behind
+# "Why?": five full cards did not fit, five short ones do.
+#
+# The cost is linear in this number only up to a point: enrichment is five more
+# tickers' worth of quotes and fundamentals, but the *model* calls are not —
+# every pick goes into one context per agent per risk profile, so this is still
+# five agents x two profiles however many picks there are.
+_PICKS = 5
 
 # The scheduler's tick, matching the advisor's.
 _TICK_SECONDS = 60

@@ -118,7 +118,7 @@ everything goes through the API — so either side can be swapped independently.
   Yahoo**, which is what keeps CNBC, FOREX and "Weak Jobs Report" off a board
   they would otherwise top. **No API key.**
 - **Discover layer** (`backend/discover.py`) — takes the trending board, drops
-  everything already held or watched, and sends the top three through
+  everything already held or watched, and sends the top five through
   `AIAdvisorService.score_context` — *the same five agents, the same weights,
   the same 0-100 scale* as everything else on screen. That's the whole design
   decision: a stock found on Reddit and a stock you've held for a year get
@@ -728,7 +728,7 @@ Everything else answers a question about stocks you already named; this one
 answers "what is everyone talking about that I haven't looked at?"
 
 ```
-GET  /api/discover           -> the three picks, both risk profiles
+GET  /api/discover           -> the five picks, both risk profiles
 POST /api/discover/refresh   -> regenerate in the background ({"started": bool})
 ```
 
@@ -752,18 +752,25 @@ outranks a name a hundred people are posting about.
 **Then it is scored like everything else.** The picks go through
 `AIAdvisorService.score_context` — the same five agents, the same per-portfolio
 weights, the same 0-100 scale, at both risk settings. The risk toggle in the AI
-Advisor column drives this panel too. Each pick shows three things, in this
-order:
+Advisor column drives this panel too. Each pick's **summary card** shows two
+things, in this order:
 
-1. **Why it's being talked about** — which lanes, how loudly, and the real
-   headlines with links.
-2. **About the company** — sector, industry, market cap, growth, margin, P/E,
+1. **About the company** — sector, industry, market cap, growth, margin, P/E,
    beta, the 52-week range, and what the business actually does. A confidence
    score on a ticker you've never heard of means nothing until you know this,
    which is why it comes before the number.
-3. **What the agents make of it** — the blended score and band, the five
-   per-agent numbers, and a **Why? →** button onto the identical five-argument
-   breakdown the AI Advisor shows for a holding.
+2. **What the agents make of it** — the blended score and band, the five
+   per-agent numbers, and the one-line verdict.
+
+**Why? →** opens the third thing: the identical five-argument breakdown the AI
+Advisor shows for a holding, followed by **why it's being talked about** —
+which lanes, how loudly, and the real headlines with links.
+
+The headlines live there rather than on the card because they are the pick's
+*provenance*: essential once you're interested in the name, and pure noise five
+times over while you're skimming five of them. At three picks a card could
+carry four headlines and still fit; at five it could not, and the version that
+did pushed every score below the fold — which inverts what the column is for.
 
 Anything already in your holdings or wishlist is excluded, so **＋ Wishlist** on
 a pick both saves it and takes it out of tomorrow's board.
@@ -844,21 +851,37 @@ that ran out of ideas. The line above the list says it every time — *Deploying
 $3,753 (38%) · Keeping $6,247 in cash at 4.25% APR — earning ~$265/yr* — and on
 a day nothing clears the bar, that line is the whole plan.
 
-**Sizing.** Each buy may claim at most an equal slice of the balance, and takes
-only the part of it its conviction has earned:
+**Sizing.** The plan lists **at most five buys** — `_MAX_BUYS`, a ceiling on the
+list, not a quota to fill. Nothing tries to reach it: the buy floor decides how
+many names qualify, and if that's three then three is the plan.
+
+Each buy may claim at most an equal slice of the balance, and takes only the
+part of it its conviction has earned:
 
 ```
-slice    = balance / 5                  ($2,000 of a $10,000 balance)
+slice    = balance / (how many buys the plan actually has)
 claim    = (confidence − 55) / (85 − 55)       capped at 1.0
 deployed = slice × claim
 ```
 
+Note the divisor: **five buys split the balance five ways, three split it three
+ways**. The agents finding fewer names worth owning is not a reason to strand
+the rest of the money — that would price "we found fewer good ideas" as though
+it were "we're less sure about the ones we found", and those are different
+statements. Conviction sizes a position; the length of the list does not. The
+consequence is worth knowing: on a day exactly one name clears the bar at high
+conviction, the plan puts the **whole** balance into it.
+
 An 85+ takes its whole slice; a 60, barely over the buy floor, takes a sixth of
-it and leaves the rest earning 4.25%. Everything unclaimed — by weak scores, by
-there being two buys instead of five, or by there being none — stays in cash. In
-practice a low-risk day on a 23-stock portfolio deploys around a third of the
-balance and a high-risk one about half, which is the point: the plan is allowed
-to disagree with the idea that money must be working.
+it and leaves the rest earning 4.25%. So what stays in cash is whatever weak
+scores don't claim — plus the entire balance on a day nothing clears the bar at
+all. In practice a low-risk day on a 23-stock portfolio still leaves a good
+share of the balance uninvested, which is the point: the plan is allowed to
+disagree with the idea that money must be working.
+
+A buy with no live quote is left out of the divisor as well as unsized — it
+can't become shares whatever slice it's given, so counting it would shrink
+everyone else's in favour of an order that never gets placed.
 
 Sells are sized off the position you hold, on the mirror scale — a quarter of it
 just under the hold band, all of it once the score reaches the low teens. A name

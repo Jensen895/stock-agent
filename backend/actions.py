@@ -69,15 +69,27 @@ liquid, so money only leaves it when a name has earned it.
 Each buy can claim at most an equal slice of the balance, and takes the part of
 that slice its conviction justifies::
 
-    slice    = budget / _MAX_BUYS                     (a fifth of the balance)
+    slice    = budget / (how many buys the plan actually has)
     claim    = (confidence - 55) / (_FULL_CONVICTION_AT - 55)   capped at 1.0
     deployed = slice x claim
 
+``_MAX_BUYS`` is a ceiling on the *list*, not a fixed divisor. Five buys split
+the balance five ways; three buys split it three ways and each gets a third.
+The agents finding only three names worth owning is not a reason to leave two
+fifths of the balance behind — that would price "we found fewer good ideas" as
+though it were "we are less sure about the ideas we found", and those are
+different statements. Conviction is what sizes a position; the length of the
+list is not.
+
 A maximum-conviction name (85+) takes its whole slice; a 60, barely over the
-buy floor, takes a sixth of it and leaves the rest earning 4.25%. Everything
-unclaimed — by weak scores, by there being only two buys instead of five, or by
-there being none at all — stays in cash and is reported with what it earns,
-rather than being pushed into the least-bad idea on the list.
+buy floor, takes a sixth of it and leaves the rest earning 4.25%. What stays in
+cash is therefore whatever weak scores don't claim — plus the whole balance
+when there are no buys at all — and it is reported with what it earns, rather
+than being pushed into the least-bad idea on the list.
+
+A name with no live quote is left out of the divisor as well as unsized: it
+cannot be turned into shares, so counting it would shrink everyone else's slice
+in favour of an order that never gets placed.
 
 Note what this is not: the score is a conviction reading, not a forecast
 return, so nothing here claims to compare an expected gain against 4.25%
@@ -129,6 +141,10 @@ _HOLD_LOW = 45.0
 # How many of each kind of action to show. A plan longer than this stops being
 # a plan: five buys is already $2,000 apiece of a $10,000 balance, and a sixth
 # "sell a little of this too" is noise rather than instruction.
+#
+# A ceiling, not a quota. Nothing tries to fill it — the buy floor decides how
+# many names qualify, and if that is two then two is the plan. It is also not
+# the divisor the slices are cut with; see ``_slice``.
 _MAX_BUYS = 5
 _MAX_SELLS = 3
 
@@ -361,11 +377,18 @@ class AiActionsService:
         sell_rows, proceeds = self._size_sells(sells, prices, owned)
 
         cash = round(budget - allocated, 2)
+        # The equal share one name could have taken, at this plan's length.
+        # Reported per profile rather than derived client-side: low and high
+        # risk routinely surface a different number of buys, so there is no one
+        # divisor for the panel to apply.
+        sizeable = sum(1 for r in buy_rows if r.get("price"))
         return {
             "risk": risk,
             "buys": buy_rows,
             "sells": sell_rows,
             "total": len(buy_rows) + len(sell_rows),
+            "slice_size": round(self._slice(budget, sizeable), 2),
+            "sizeable_buys": sizeable,
             # A balance of exactly nothing. Distinct from "nothing scored well
             # enough today", and the two want different sentences on screen.
             "no_cash": budget <= 0,
@@ -385,9 +408,20 @@ class AiActionsService:
             "sell_proceeds": round(proceeds, 2),
         }
 
-    def _slice(self, budget: float) -> float:
-        """The most any single name may take out of cash."""
-        return budget / self.max_buys if self.max_buys else 0.0
+    @staticmethod
+    def _slice(budget: float, sizeable: int) -> float:
+        """The most any single name may take out of cash.
+
+        Cut with the number of buys the plan actually has, not ``_MAX_BUYS``.
+        Three names split the balance three ways. The cap limits how long the
+        list may get; it does not decide how much of the balance a shorter list
+        is allowed to reach — see the sizing note at the top of the module.
+
+        ``sizeable`` counts only the buys that have a live quote, since the
+        ones that don't can't be turned into shares whatever slice they're
+        given. Zero of them means there is nothing to size and no slice.
+        """
+        return budget / sizeable if sizeable else 0.0
 
     def _size_buys(self, buys: list, prices: dict, owned: dict, budget: float):
         """Turn the buy candidates into share counts. Returns (rows, allocated).
@@ -398,6 +432,9 @@ class AiActionsService:
         agents were only lukewarm about.
         """
         rows = [self._row(c, prices, owned) for c in buys]
+        # Sized off the priced rows only, so an unquoted name doesn't shrink
+        # the slice of every name that can actually be bought.
+        one_slice = self._slice(budget, sum(1 for r in rows if r["price"]))
         allocated = 0.0
         for row in rows:
             if not row["price"]:
@@ -406,7 +443,7 @@ class AiActionsService:
                 row.update(shares=None, cost=None, claim_pct=None, unpriced=True)
                 continue
             claim = _claim(row["confidence"])
-            shares = self._slice(budget) * claim / row["price"]
+            shares = one_slice * claim / row["price"]
             cost = round(shares * row["price"], 2)
             row.update(
                 shares=round(shares, 4),
@@ -415,6 +452,9 @@ class AiActionsService:
                 # number that explains the size — a share of the total would
                 # make a lone weak buy look like a full-conviction bet.
                 claim_pct=round(claim * 100, 1),
+                # The slice it was measured against, so the UI can caption the
+                # claim without re-deriving a divisor it can't see.
+                slice_size=round(one_slice, 2),
             )
             allocated += cost
         return rows, allocated

@@ -36,12 +36,12 @@
     <div class="left-region">
 
     <!-- IN THE NEWS (read only) — the only panel that starts from outside your
-         list: three stocks the market is talking about that you neither hold
+         list: five stocks the market is talking about that you neither hold
          nor watch, scored by the same five agents as everything else. -->
     <aside class="news-col panel-col">
       <section class="card panel-card news-card">
         <div class="ai-head">
-          <h2 title="The three most talked-about stocks across retail chatter (Reddit / StockTwits), the financial press, and the Wall Street Journal — excluding anything already in your holdings or wishlist. Each one carries why it's being talked about, what the company actually does, and the same 0-100 confidence score from the same five agents as the AI Advisor, so the numbers in the two columns mean the same thing. Refreshes once a day at the opening bell.">📰 In the News</h2>
+          <h2 title="The five most talked-about stocks across retail chatter (Reddit / StockTwits), the financial press, and the Wall Street Journal — excluding anything already in your holdings or wishlist. Each card says what the company actually does and gives it the same 0-100 confidence score from the same five agents as the AI Advisor, so the numbers in the two columns mean the same thing. The headlines that put it on the board are behind 'Why?'. Refreshes once a day at the opening bell.">📰 In the News</h2>
           <button id="news-refresh" class="secondary" type="button">Refresh</button>
         </div>
 
@@ -66,7 +66,8 @@
           </div>
 
           <!-- The five agents' full argument for one pick, same cards as the
-               AI Advisor's details view. -->
+               AI Advisor's details view — plus the chatter and headlines that
+               surfaced it, which the summary card no longer carries. -->
           <div id="news-details-view" hidden>
             <button id="news-back" class="link-btn ai-back" type="button">
               ← Back to the list
@@ -195,7 +196,7 @@
          or the balance does. -->
     <section class="card actions-card">
       <div class="section-head">
-        <h2 title="What the agents' scores imply you should do right now, sized in shares against your Available to trade balance — or a pretend $10,000 while you haven't set one. Buys come from your holdings, your wishlist and the In the News column — whichever score as a genuine buy. Nothing has to be spent: uninvested money earns 4.25% APR, so a name only takes cash when its conviction has earned it, and what stays behind keeps paying. No model runs to produce this; it is the same scores you see in the AI columns, turned into orders.">🎯 AI Actions</h2>
+        <h2 title="What the agents' scores imply you should do right now, sized in shares against your Available to trade balance — or a pretend $10,000 while you haven't set one. Buys come from your holdings, your wishlist and the In the News column — whichever score as a genuine buy, up to five of them. Five is a ceiling, not a quota: if only three names qualify, the balance is split three ways rather than five. Nothing has to be spent even then — uninvested money earns 4.25% APR, so a name only takes cash when its conviction has earned it, and what stays behind keeps paying. No model runs to produce this; it is the same scores you see in the AI columns, turned into orders.">🎯 AI Actions</h2>
         <span id="actions-budget" class="actions-budget">—</span>
       </div>
       <p class="hint">What to do now, sized against your

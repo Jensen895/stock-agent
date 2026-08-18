@@ -1823,7 +1823,7 @@ class AIAdvisorService:
         thing in this module, and they are not specific to a portfolio — they
         score whatever tickers you put in front of them. This exposes that
         machinery to callers who assemble their own evidence: the discover panel
-        scores three stocks nobody owns and which are not on the wishlist, and
+        scores five stocks nobody owns and which are not on the wishlist, and
         should get exactly the same treatment as everything else on screen
         rather than a second, lesser scoring path.
 
