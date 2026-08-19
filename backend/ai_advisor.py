@@ -1439,7 +1439,7 @@ class AIAdvisorService:
                  storage=None, analysts=None,
                  agent_weights=None, fundamentals=None, wishlist=None,
                  macro_news=None, weights_storage=None, sales=None,
-                 cash=None, recorder=None):
+                 cash=None, recorder=None, mandate=None):
         # Accept a single client or a list, so existing callers keep working.
         if not isinstance(clients, (list, tuple)):
             clients = [clients]
@@ -1477,6 +1477,20 @@ class AIAdvisorService:
         # that ``backtest.py`` has yesterday's scores to measure, which this
         # file's own storage cannot provide because it keeps only the latest.
         self.recorder = recorder
+        # A standing instruction handed to every agent on every call — the
+        # deadline and remit the book is being run under, not a sixth slice of
+        # evidence (see ``ai_agents.mandate_note``). None for the app itself, so
+        # nothing about the ordinary prompts changes.
+        #
+        # It lives on the service rather than on the context because there are
+        # two contexts: ``_gather_context`` builds the portfolio's, and callers
+        # of ``score_context`` build their own — Discover assembles a context
+        # for stocks nobody owns. Hanging it here means the discover column is
+        # run under the same mandate as the other two instead of being the one
+        # place that forgot there was a deadline. Mutable on purpose: the
+        # competition harness reassigns it as it moves from one portfolio to
+        # the next, in the same breath as ``reload()``.
+        self.mandate = mandate
 
         # Per-portfolio weights live on disk next to the suggestions; the
         # constructor argument (from AI_AGENT_WEIGHTS) is the default a
@@ -1638,6 +1652,18 @@ class AIAdvisorService:
             return False
         threading.Thread(target=self._safe_generate, daemon=True).start()
         return True
+
+    def refresh_now(self) -> None:
+        """Regenerate on the calling thread, returning when it is done.
+
+        The UI wants ``request_refresh``: it has a spinner, and a request that
+        blocked for two minutes would be a request that timed out. A script has
+        the opposite problem — the competition harness has to place today's
+        trades against today's scores, and a background thread it doesn't wait
+        for is a guarantee it will trade on yesterday's. Same generation, same
+        guard against two at once; only who waits for it changes.
+        """
+        self._safe_generate()
 
     def start_scheduler(self):
         """Start the background loop: generate once on boot (if nothing is
@@ -1894,11 +1920,13 @@ class AIAdvisorService:
             return None  # this agent has no evidence on this side — stay quiet
 
         system = agent.system(kind)
-        # The balance rides on the context, not on the payload: it is the same
-        # line for all five agents and belongs to none of their evidence
-        # slices. Absent (a vacant section) leaves the prompt untouched.
+        # The balance rides on the context and the mandate on the service, but
+        # neither rides on the payload: both are the same line for all five
+        # agents and belong to none of their evidence slices. Absent (a vacant
+        # section, no mandate) leaves the prompt untouched.
         prompt = agent.prompt(payload, kind, risk,
-                              available_cash=context.get("available_cash"))
+                              available_cash=context.get("available_cash"),
+                              mandate=self.mandate)
 
         start = AGENT_KEYS.index(agent.key) % len(clients)
         rotation = [clients[(start + i) % len(clients)] for i in range(len(clients))]

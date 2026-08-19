@@ -169,17 +169,25 @@ _ORIGINS = {
 }
 
 
-def _claim(confidence) -> float:
+def _claim(confidence, floor: float = _BUY_FLOOR,
+           full_at: float = _FULL_CONVICTION_AT) -> float:
     """How much of its slice a score has earned, 0.0 -> 1.0.
 
     The fraction of the balance a name takes *out of cash*. At the buy floor it
     is 0 — a name that only just qualifies has not made the case for money that
-    is already earning 4.25% — and it reaches 1.0 at ``_FULL_CONVICTION_AT``.
+    is already earning 4.25% — and it reaches 1.0 at ``full_at``.
+
+    Both edges are arguments rather than constants because they are the two
+    dials that turn one allocator into a fussy one and a bold one: raise the
+    floor and fewer names qualify at all, lower ``full_at`` and the ones that do
+    are backed harder. The app passes neither and gets the module defaults; the
+    competition harness gives each of its three agents its own pair, which is
+    most of what makes them different allocators over identical scores.
     """
     if confidence is None:
         return 0.0
-    span = _FULL_CONVICTION_AT - _BUY_FLOOR
-    return max(0.0, min(1.0, (float(confidence) - _BUY_FLOOR) / span))
+    span = max(1e-9, float(full_at) - float(floor))
+    return max(0.0, min(1.0, (float(confidence) - float(floor)) / span))
 
 
 def _sell_fraction(confidence) -> float:
@@ -213,7 +221,8 @@ class AiActionsService:
 
     def __init__(self, advisor, discover, market, portfolio, available=None,
                  budget: float = _BUDGET, max_buys: int = _MAX_BUYS,
-                 max_sells: int = _MAX_SELLS):
+                 max_sells: int = _MAX_SELLS, buy_floor: float = _BUY_FLOOR,
+                 full_conviction_at: float = _FULL_CONVICTION_AT):
         self.advisor = advisor
         self.discover = discover
         self.market = market
@@ -226,6 +235,12 @@ class AiActionsService:
         self.budget = float(budget)
         self.max_buys = max_buys
         self.max_sells = max_sells
+        # How selective this allocator is, and how hard it backs what clears
+        # the bar — see ``_claim``. The app takes the defaults; a caller running
+        # several allocators over the same scores varies them per allocator,
+        # which is the whole difference between them.
+        self.buy_floor = float(buy_floor)
+        self.full_conviction_at = float(full_conviction_at)
 
     # --- public API -----------------------------------------------------
 
@@ -264,8 +279,8 @@ class AiActionsService:
             # standing in for one you haven't. The UI captions the number from
             # this rather than presenting pretend money as though it were real.
             "budget_source": source,
-            "buy_floor": _BUY_FLOOR,
-            "full_conviction_at": _FULL_CONVICTION_AT,
+            "buy_floor": self.buy_floor,
+            "full_conviction_at": self.full_conviction_at,
             "max_buys": self.max_buys,
             # What unspent money earns — the reason the plan is allowed to
             # leave any. Same figure the agents are told about.
@@ -354,7 +369,7 @@ class AiActionsService:
             (
                 c for c in candidates
                 if c["suggestion"].get("action") == "buy"
-                and (c["confidence"] or 0) >= _BUY_FLOOR
+                and (c["confidence"] or 0) >= self.buy_floor
             ),
             key=lambda c: c["confidence"] or 0,
             reverse=True,
@@ -442,7 +457,8 @@ class AiActionsService:
                 # inventing one; its dollars stay in cash.
                 row.update(shares=None, cost=None, claim_pct=None, unpriced=True)
                 continue
-            claim = _claim(row["confidence"])
+            claim = _claim(row["confidence"], self.buy_floor,
+                           self.full_conviction_at)
             shares = one_slice * claim / row["price"]
             cost = round(shares * row["price"], 2)
             row.update(

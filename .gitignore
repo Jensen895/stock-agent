@@ -22,3 +22,9 @@ LOCAL_CLAUDE.md
 # code (backtest.py, backend/backtest/) is tracked; this is one portfolio's
 # private history of what its agents scored and what happened next.
 data/backtest/
+
+# The competition's own data: the roster, the day-by-day ledger, the reports,
+# and (with the local-CLI provider) each agent's raw model answers. The code
+# (competition.py, backend/competition/) is tracked; this is one run's private
+# record of three books trading fake money.
+data/competition/

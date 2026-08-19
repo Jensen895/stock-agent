@@ -1118,3 +1118,123 @@ Expect "not enough data yet" for a long while; that is the honest answer, and
 
 See `backend/backtest/` for the details, and `python3 backtest.py --help` for
 the rest of the flags.
+
+## Competition (`python3 competition.py`)
+
+A third command, also **not part of the app**. Three portfolios — A, B and C —
+each given **$5,000 of fake money** and run by its own AI agent for **thirty
+trading sessions**. Every day after the close it scores, trades, marks all three
+books and writes one report saying what each agent is worth, what it bought and
+sold, what it decided *against*, and what its five researchers were thinking.
+
+```bash
+python3 competition.py init       # create the three books, once
+python3 competition.py run        # today's session + today's report
+python3 competition.py watch      # do that automatically at every close
+python3 competition.py standings  # the whole month on one screen
+python3 competition.py agents     # who the three are
+```
+
+### What is being tested
+
+All three agents run the **same five researchers** from `backend/ai_agents.py`,
+over the **same evidence**, the **same twenty-name universe**, the **same
+Discover feed**, at the **same time of day**, with the **same money**. Two
+things differ, and only these two:
+
+| | A — The Quant | B — The Narrative Trader | C — The Committee |
+| --- | --- | --- | --- |
+| **Leans on** | statistics ×2.5, expert ×1.5 | company ×2.5, macro ×1.5 | expert ×1.5, rest ×1.0 |
+| **Risk profile** | low | high | low |
+| **Buys above** | 58 | 55 | 62 |
+| **Full size at** | 82 | 78 | 85 |
+| **Buys / sells a day** | 4 / 3 | 5 / 3 | 3 / 2 |
+| **One name capped at** | 30% | 40% | 25% |
+| **Cash it won't deploy** | 10% | 0% | 20% |
+| **Only buys when** | any vote | any vote | agents agree or are mixed |
+
+Anything that separates the three books after thirty sessions was produced by
+the weighting and the policy, and by nothing else — which is what makes the
+**"Where they disagreed"** section at the foot of each report the interesting
+part, and the leaderboard the hook.
+
+### The shape of a day
+
+Per agent, one at a time: switch to its workspace → mark the book → build
+today's **mandate** (day number, sessions left, balance, this agent's remit) →
+run the advisor's twenty calls and Discover's ten → screen the plan's sells
+through the policy and book them → **re-request the plan** and buy against the
+proceeds → mark again.
+
+That second plan request is what lets an agent rotate out of a loser and into a
+new name on the same day. `AiActionsService` is pure arithmetic over scores that
+already exist, so asking twice costs a quote fetch and no model call — and the
+buys in the first pass were sized before the sale money existed.
+
+Sells credit cash here and only here. `PortfolioService.sell_stock` deliberately
+doesn't, because in the app "available to trade" is a note about a brokerage
+account the code cannot see; in a paper contest the JSON file *is* the account.
+
+### What the agents are told
+
+Every agent gets one extra paragraph beyond its own evidence — the same
+paragraph for all five, so the disjoint-evidence guarantee is unchanged. It
+carries the deadline (`"Day 7 of 30. 23 trading sessions remain"`), the balance,
+the fact that the book is marked to market at the final close with no credit for
+a thesis that is still right and not yet paid, and that agent's remit. Without
+it the researchers keep answering the one-to-three-month question the app was
+built around, which is the wrong horizon for a book that closes in six weeks.
+See `ai_agents.mandate_note` for how it is framed and why.
+
+### Where it lives
+
+Three ordinary registered workspaces, so the contest is visible in the app: open
+the portfolio switcher and *"Agent A — The Quant"* is there, sliders already set
+to A's weighting, with its own holdings and its own AI columns. The daily report
+says what A did; the app lets you go and look at why.
+
+The record is under `data/competition/` — `contest.json` (the roster),
+`ledger.json` (one append-only row per session, carrying every trade and every
+argument behind it), `reports/YYYY-MM-DD.md`, and `responses/<agent>/` (each
+agent's raw model answers, with the local-CLI provider). Reports are rendered
+*from* the ledger, so any day can be reprinted later and a bug in the renderer
+costs a re-render rather than the record.
+
+A session is keyed on its date and is idempotent: `run` and `watch` can both
+fire for the same close, and the second does nothing. A missed close catches up
+on the next run rather than double-booking; a session missed by more than a day
+is simply lost, because the reasoning behind those trades can't be invented
+after the fact. During market hours `run` refuses without `--force` — every
+price it uses is a live quote, and an intraday mark recorded as a close is a lie
+in the ledger.
+
+### What it costs
+
+One session is 10 model calls per agent while a book is empty, and up to 30 once
+it holds positions and Discover is on — so 30 to 90 calls a day across the
+three. On `claude-opus-5` that measured **$20.77** for day one at ~112s a call,
+which puts a full thirty sessions in the **$600-900** range and a day at half an
+hour of wall clock.
+
+Three levers, in order of how much they cost you:
+
+- `--no-discover` halves the calls. The twenty-name universe still trades; the
+  agents just stop being shown what the market is talking about, which is where
+  B found MU on day one.
+- `LOCAL_CLAUDE_MODEL=sonnet` in `.env` is the big one, and the honest trade: a
+  cheaper model writes shorter arguments, and the arguments are the point.
+- Trim `UNIVERSE` in `backend/competition/agents.py`. Fewer names is fewer
+  tokens per call rather than fewer calls, so it saves less than it looks like
+  it should.
+
+### Read the spread before you read the order
+
+Thirty sessions is a very short sample. Three strategies will finish in some
+order whether or not any of them is better, and a gap of a point or two after
+six weeks is well inside what identical strategies produce by chance. The
+durable output is the reasoning captured each day; `python3 backtest.py
+--portfolio all` measures the underlying agents directly, which is the more
+reliable question to ask of the same data.
+
+See `backend/competition/` for the details, and `python3 competition.py --help`
+for the rest of the flags.

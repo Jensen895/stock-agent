@@ -176,6 +176,14 @@ class DiscoverService:
         threading.Thread(target=self._safe_generate, daemon=True).start()
         return True
 
+    def refresh_now(self) -> None:
+        """Regenerate on the calling thread — see ``AIAdvisorService.refresh_now``.
+
+        For scripts that have to act on the result rather than render it when
+        it arrives.
+        """
+        self._safe_generate()
+
     def start_scheduler(self):
         """Generate on boot if nothing is cached, then daily at the bell."""
         if not self.available():

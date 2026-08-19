@@ -281,6 +281,61 @@ def available_cash_note(amount) -> str:
     )
 
 
+def mandate_note(text) -> str:
+    """The standing instruction this portfolio is run under, when it has one.
+
+    Returns "" for None or blank — which is what the app itself always passes,
+    so the ordinary assistant's prompts are untouched by this existing.
+
+    The one caller today is the 30-day competition harness
+    (``backend/competition``), where three portfolios are run by the same five
+    agents under three different weightings and each has a deadline. Two facts
+    have to reach the models for their scores to mean anything there, and
+    neither is evidence about a company:
+
+      the clock     A one-to-three-month call is the horizon this app is built
+                    around, and it is the wrong horizon for a book that is
+                    marked to market in eleven trading days. Told nothing, the
+                    agents keep answering the question they were designed for
+                    and their scores quietly stop matching what they are being
+                    used for.
+      the remit     "Only act on names the raw numbers like" is a real
+                    constraint on what a score is *for*, and an agent that
+                    doesn't know it will score a thin, story-driven name a
+                    confident 70 that the portfolio it belongs to would never
+                    act on.
+
+    Like ``available_cash_note`` this is handed to all five agents *identically*
+    and is deliberately not a sixth slice of evidence, so the disjoint-evidence
+    guarantee the module rests on is unchanged: every agent still reasons from
+    its own data alone, it just knows what the answer is being used for.
+
+    The framing below matters as much as the text. Dropped in bare, models read
+    a mandate as a hint about the right answer and drift toward it; named as a
+    constraint on the *use* of the score, with an explicit instruction not to
+    let it move the number, they price the deadline instead of pleasing it.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return (
+        "THE MANDATE THIS PORTFOLIO IS RUN UNDER. This is not evidence and it "
+        "is not a hint about what to conclude — all five agents are being told "
+        "exactly the same thing. It is what your score will be used for, and "
+        "you can only price the horizon correctly if you know it:\n"
+        f"{text}\n"
+        "Two rules about it:\n"
+        "  - Let it set the HORIZON and the BAR, not the answer. If the mandate "
+        "gives you weeks and your evidence is about a thesis that needs "
+        "quarters, that is a lower score — say so and say why. Do not raise a "
+        "score because the mandate wants action, and do not lower one because "
+        "it counsels caution.\n"
+        "  - It does not narrow your dimension. You still read only your own "
+        "evidence and you still answer only from it; the mandate tells you when "
+        "the answer is due, not which numbers to look at."
+    )
+
+
 # --- fundamentals, split between the agents that may see them -----------
 #
 # Disjoint by construction. ``fundamentals_data.py`` returns one flat dict per
@@ -386,19 +441,22 @@ class Agent:
         )
 
     def prompt(self, payload: dict, kind: str, risk: str,
-               available_cash=None) -> str:
-        """The user turn: the stance, the balance (if any), then the evidence.
+               available_cash=None, mandate=None) -> str:
+        """The user turn: the stance, the constraints, then the evidence.
 
-        ``available_cash`` is the only thing here that is shared across all
-        five agents, and like ``_CASH`` in the system prompt it is a constraint
-        rather than evidence — see ``available_cash_note``. None (the default,
-        and what a vacant section produces) leaves the prompt exactly as it was
-        before the feature existed.
+        ``available_cash`` and ``mandate`` are the only things here that are
+        shared across all five agents, and like ``_CASH`` in the system prompt
+        they are constraints rather than evidence — see ``available_cash_note``
+        and ``mandate_note``. Both default to None, which is what the app
+        passes for the mandate and what a vacant balance produces, and that
+        leaves the prompt exactly as it was before either feature existed.
         """
         budget = available_cash_note(available_cash)
+        standing = mandate_note(mandate)
         return (
             f"{_STANCE[risk]}\n\n"
             + (f"{budget}\n\n" if budget else "")
+            + (f"{standing}\n\n" if standing else "")
             + f"{self.data_note(kind)}\n\n"
             f"{json.dumps(payload, indent=2, default=str)}"
         )
